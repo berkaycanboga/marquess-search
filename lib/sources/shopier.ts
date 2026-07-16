@@ -1,9 +1,10 @@
 import * as cheerio from "cheerio";
 import type { Page } from "patchright-core";
-import { fetchWithTimeout, sleep, withTimeout, CookieJar, HttpError, BROWSER_USER_AGENT } from "../http";
+import { fetchWithTimeout, sleep, withTimeout, CookieJar, HttpError } from "../http";
 import { launchBrowser, newStealthContext } from "../browser";
 import { parseTurkishPrice } from "../format";
 import { buildVariant, variantsFromDataAttributes, variantsFromLabeledElements } from "../htmlVariants";
+import { readShopierCache, isCacheStale, filterCachedProducts } from "../shopierCache";
 import { SOURCE_LABELS, type ProductResult, type ProductVariant, type SourceResult } from "../types";
 
 // John Lucas Fragrances' Shopier store slug, from the notes.
@@ -24,69 +25,114 @@ interface RawShopierItem {
   inStock?: boolean;
 }
 
+/**
+ * Cache-first: Shopier's Cloudflare Turnstile protection has repeatedly
+ * beaten every automated bypass tried here (plain fetch, headless Playwright,
+ * JS-property stealth patches, a CDP-leak-patched fork — see lib/browser.ts
+ * notes), so live-scraping it on every user search isn't a reliable strategy.
+ * `data/shopier-products.json` is synced separately, locally, by a human via
+ * `npm run shopier:sync:headed` (see scripts/sync-shopier.mjs) — a real,
+ * visible Chrome where you solve the Cloudflare challenge by hand once.
+ *
+ * A fresh cache is served directly, without attempting a live request at
+ * all — the whole point is to stop hitting Shopier's WAF on every search. A
+ * missing/stale cache tries a live fetch as a fallback; if that also fails
+ * but an old cache still exists, its (stale) results are still served with
+ * `degraded: true` rather than showing nothing.
+ */
 export async function searchShopier(query: string): Promise<SourceResult> {
   const start = Date.now();
   const label = SOURCE_LABELS.shopier;
 
-  try {
-    let items: RawShopierItem[];
-    let jar = new CookieJar();
+  const cache = await readShopierCache();
+  const cacheIsFresh = cache != null && !isCacheStale(cache.updatedAt);
 
-    try {
-      const httpResult = await fetchShopierSearchViaHttp(query);
-      items = httpResult.items;
-      jar = httpResult.jar;
-    } catch (httpErr) {
-      // Plain HTTP got blocked (see notes: Shopier's WAF appears to fingerprint
-      // at the TLS/JS level, not just headers) — fall back to a real headless
-      // browser, which carries a genuine browser fingerprint. See lib/browser.ts.
-      try {
-        items = await withTimeout(
-          fetchShopierSearchViaBrowser(query),
-          BROWSER_FALLBACK_TIMEOUT_MS,
-          `Headless browser denemesi ${BROWSER_FALLBACK_TIMEOUT_MS}ms içinde tamamlanamadı`,
-        );
-      } catch (browserErr) {
-        const httpMsg = httpErr instanceof Error ? httpErr.message : "istek başarısız";
-        const browserMsg = browserErr instanceof Error ? browserErr.message : "bilinmeyen hata";
-        throw new HttpError(`${httpMsg} — headless browser denemesi de başarısız oldu: ${browserMsg}`);
-      }
-    }
-
-    const rawItems = items.slice(0, 20);
-
-    const settled = await Promise.allSettled(
-      rawItems.map(async (item, i) => {
-        if (i >= MAX_DETAIL_FETCHES || !item.url) {
-          return shopierItemToProduct(item, []);
-        }
-        if (i > 0) await sleep(DETAIL_FETCH_DELAY_MS);
-        try {
-          return await hydrateShopierProduct(item, jar);
-        } catch {
-          return shopierItemToProduct(item, []);
-        }
-      }),
-    );
-
-    const products: ProductResult[] = [];
-    let degraded = false;
-    for (const result of settled) {
-      if (result.status === "fulfilled" && result.value) products.push(result.value);
-      else degraded = true;
-    }
-
-    return { source: "shopier", label, ok: true, degraded, products, tookMs: Date.now() - start };
-  } catch (err) {
+  if (cache && cacheIsFresh) {
     return {
       source: "shopier",
       label,
-      ok: false,
-      error: err instanceof Error ? err.message : "Bilinmeyen hata",
-      products: [],
+      ok: true,
+      degraded: false,
+      products: filterCachedProducts(cache, query),
       tookMs: Date.now() - start,
+      cachedAt: cache.updatedAt,
     };
   }
+
+  try {
+    const { products, degraded } = await fetchShopierLive(query);
+    return { source: "shopier", label, ok: true, degraded, products, tookMs: Date.now() - start };
+  } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : "Bilinmeyen hata";
+
+    if (cache) {
+      // Live fetch failed, but a (stale) synced snapshot still exists —
+      // degrade to that instead of showing nothing for this source.
+      return {
+        source: "shopier",
+        label,
+        ok: true,
+        degraded: true,
+        error: `Canlı sorgu başarısız oldu (${errorMsg}); ${cache.updatedAt} tarihli önbellek gösteriliyor.`,
+        products: filterCachedProducts(cache, query),
+        tookMs: Date.now() - start,
+        cachedAt: cache.updatedAt,
+      };
+    }
+
+    return { source: "shopier", label, ok: false, error: errorMsg, products: [], tookMs: Date.now() - start };
+  }
+}
+
+async function fetchShopierLive(query: string): Promise<{ products: ProductResult[]; degraded: boolean }> {
+  let items: RawShopierItem[];
+  let jar = new CookieJar();
+
+  try {
+    const httpResult = await fetchShopierSearchViaHttp(query);
+    items = httpResult.items;
+    jar = httpResult.jar;
+  } catch (httpErr) {
+    // Plain HTTP got blocked (see notes: Shopier's WAF appears to fingerprint
+    // at the TLS/JS level, not just headers) — fall back to a real headless
+    // browser, which carries a genuine browser fingerprint. See lib/browser.ts.
+    try {
+      items = await withTimeout(
+        fetchShopierSearchViaBrowser(query),
+        BROWSER_FALLBACK_TIMEOUT_MS,
+        `Headless browser denemesi ${BROWSER_FALLBACK_TIMEOUT_MS}ms içinde tamamlanamadı`,
+      );
+    } catch (browserErr) {
+      const httpMsg = httpErr instanceof Error ? httpErr.message : "istek başarısız";
+      const browserMsg = browserErr instanceof Error ? browserErr.message : "bilinmeyen hata";
+      throw new HttpError(`${httpMsg} — headless browser denemesi de başarısız oldu: ${browserMsg}`);
+    }
+  }
+
+  const rawItems = items.slice(0, 20);
+
+  const settled = await Promise.allSettled(
+    rawItems.map(async (item, i) => {
+      if (i >= MAX_DETAIL_FETCHES || !item.url) {
+        return shopierItemToProduct(item, []);
+      }
+      if (i > 0) await sleep(DETAIL_FETCH_DELAY_MS);
+      try {
+        return await hydrateShopierProduct(item, jar);
+      } catch {
+        return shopierItemToProduct(item, []);
+      }
+    }),
+  );
+
+  const products: ProductResult[] = [];
+  let degraded = false;
+  for (const result of settled) {
+    if (result.status === "fulfilled" && result.value) products.push(result.value);
+    else degraded = true;
+  }
+
+  return { products, degraded };
 }
 
 // --- search: plain HTTP (fast path) ------------------------------------------
@@ -144,15 +190,18 @@ async function fetchShopierSearchViaBrowser(query: string): Promise<RawShopierIt
   try {
     // locale/timezoneId matched to the tr-TR Accept-Language DEFAULT_HEADERS
     // already sends — a real Turkish visitor wouldn't have these mismatched,
-    // and WAFs do check for that kind of inconsistency.
+    // and WAFs do check for that kind of inconsistency. Deliberately no
+    // `userAgent` override: forcing a fixed UA string (previously a Chrome
+    // 124/Windows string) while the actual binary is @sparticuz/chromium's
+    // Chromium 149 is itself a fingerprint mismatch — let the real browser
+    // report its own real identity instead.
     const context = await newStealthContext(browser, {
-      userAgent: BROWSER_USER_AGENT,
       locale: "tr-TR",
       timezoneId: "Europe/Istanbul",
     });
     const page = await context.newPage();
     await page.goto(STORE_URL, { waitUntil: "domcontentloaded", timeout: 20_000 });
-    await waitOutCloudflareChallenge(page);
+    await waitForRealShopierPage(page);
     await dismissPopup(page);
     return await searchViaDirectFetch(page, query);
   } finally {
@@ -160,28 +209,33 @@ async function fetchShopierSearchViaBrowser(query: string): Promise<RawShopierIt
   }
 }
 
-const CLOUDFLARE_CHALLENGE_TIMEOUT_MS = 12_000;
+const REAL_PAGE_WAIT_TIMEOUT_MS = 15_000;
+const CSRF_META_SELECTOR = 'meta[name="csrf-token"]';
 
 /**
  * Confirmed live (see notes): the store is behind Cloudflare Turnstile, and a
  * plain page.goto can land on its "Just a moment..." interstitial instead of
- * the real page. Some Turnstile challenges resolve automatically for any
- * JS-capable client after a few seconds — worth waiting out explicitly rather
- * than the flat 2.5s dismissPopup delay (meant for the discount popup, not
- * this). If it's still showing the interstitial after this timeout, the
- * challenge is very likely fingerprinting the browser as automated rather
- * than just timing a puzzle, and no amount of waiting will clear it.
+ * the real page. A page-title check alone is too weak a signal (a redesign
+ * could rename/remove that title) — instead wait for the one thing the real
+ * page actually needs for search to work at all: the csrf-token meta tag
+ * searchViaDirectFetch reads below. If it never appears, surface exactly what
+ * we did land on (title/url/body preview) instead of a generic timeout, so
+ * the real cause — still-challenged vs. a genuinely changed page — is visible
+ * without needing server logs.
  */
-async function waitOutCloudflareChallenge(page: Page): Promise<void> {
-  const onChallenge = await page.title().then((title) => title.includes("Just a moment"));
-  if (!onChallenge) return;
-
+async function waitForRealShopierPage(page: Page): Promise<void> {
   try {
-    await page.waitForFunction(() => !document.title.includes("Just a moment"), undefined, {
-      timeout: CLOUDFLARE_CHALLENGE_TIMEOUT_MS,
-    });
+    await page.waitForSelector(CSRF_META_SELECTOR, { state: "attached", timeout: REAL_PAGE_WAIT_TIMEOUT_MS });
   } catch {
-    throw new HttpError("Cloudflare doğrulaması (Just a moment...) zaman aşımında temizlenmedi — headless tarayıcı bot olarak algılanmış olabilir");
+    const title = await page.title().catch(() => "(alınamadı)");
+    const url = page.url();
+    const bodyPreview = await page
+      .evaluate(() => document.body?.innerText?.slice(0, 300) ?? "")
+      .catch(() => "(alınamadı)");
+    throw new HttpError(
+      `Gerçek Shopier sayfası ${REAL_PAGE_WAIT_TIMEOUT_MS / 1000} saniye içinde yüklenmedi ` +
+        `(csrf-token meta etiketi bulunamadı). title="${title}" url="${url}" body-önizleme="${bodyPreview}"`,
+    );
   }
 }
 

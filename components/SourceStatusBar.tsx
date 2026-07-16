@@ -1,5 +1,17 @@
 import type { SourceResult } from "@/lib/types";
 
+const cacheDateFormatter = new Intl.DateTimeFormat("tr-TR", {
+  day: "numeric",
+  month: "short",
+  hour: "2-digit",
+  minute: "2-digit",
+});
+
+function formatCacheDate(iso: string): string {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? iso : cacheDateFormatter.format(date);
+}
+
 export function SourceStatusBar({ sources }: { sources: SourceResult[] }) {
   return (
     <div className="flex flex-wrap gap-2">
@@ -28,7 +40,11 @@ export function SourceStatusBar({ sources }: { sources: SourceResult[] }) {
             <span>
               {s.ok ? (s.degraded ? `${s.products.length} sonuç · kısmi veri` : `${s.products.length} sonuç`) : "erişilemedi"}
             </span>
-            <span className="text-muted">{s.tookMs}ms</span>
+            {s.cachedAt ? (
+              <span className="text-muted">önbellek: {formatCacheDate(s.cachedAt)}</span>
+            ) : (
+              <span className="text-muted">{s.tookMs}ms</span>
+            )}
           </div>
         );
       })}

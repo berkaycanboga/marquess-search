@@ -36,10 +36,12 @@ yarn-error.log*
 # vercel
 .vercel
 
-# scripts/shopier-manual-capture.mjs output — a real Chrome profile (session
-# cookies) and a raw HTML dump, neither of which belong in source control.
-/shopier-browser-profile/
-/shopier-page.html
+# scripts/sync-shopier.mjs output — a real Chrome profile (session cookies)
+# and a raw HTML debug dump, neither of which belong in source control.
+# data/shopier-products.json (the actual synced catalog) is NOT ignored —
+# it ships with the app, see lib/shopierCache.ts.
+/.shopier-profile/
+/shopier-sync-debug.html
 
 # typescript
 *.tsbuildinfo

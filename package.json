@@ -10,7 +10,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "inspect": "node scripts/inspect.mjs"
+    "inspect": "node scripts/inspect.mjs",
+    "shopier:sync": "node scripts/sync-shopier.mjs",
+    "shopier:sync:headed": "node scripts/sync-shopier.mjs --headed"
   },
   "dependencies": {
     "@sparticuz/chromium": "^149.0.0",

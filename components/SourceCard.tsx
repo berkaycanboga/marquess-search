@@ -4,6 +4,14 @@ import { useState } from "react";
 import { formatTRY } from "@/lib/format";
 import type { ProductResult, SourceResult } from "@/lib/types";
 
+const cardCacheDateFormatter = new Intl.DateTimeFormat("tr-TR", {
+  day: "numeric",
+  month: "long",
+  year: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+});
+
 export function SourceCard({ result }: { result: SourceResult }) {
   const tone = !result.ok ? "danger" : result.degraded ? "accent" : "success";
 
@@ -19,7 +27,14 @@ export function SourceCard({ result }: { result: SourceResult }) {
         />
       </div>
 
+      {result.cachedAt && (
+        <p className="mb-2 text-xs text-muted">
+          Son güncelleme: {cardCacheDateFormatter.format(new Date(result.cachedAt))}
+        </p>
+      )}
+
       {!result.ok && <p className="text-sm text-danger">{result.error}</p>}
+      {result.ok && result.degraded && result.error && <p className="mb-2 text-xs text-accent">{result.error}</p>}
 
       {result.ok && result.products.length === 0 && (
         <p className="text-sm text-muted">Bu kaynakta sonuç bulunamadı.</p>

@@ -35,6 +35,10 @@ export interface SourceResult {
   degraded?: boolean;
   products: ProductResult[];
   tookMs: number;
+  /** ISO timestamp of the underlying data snapshot, when results came from a
+   * synced cache rather than a live request (currently Shopier only — see
+   * lib/shopierCache.ts / scripts/sync-shopier.mjs). */
+  cachedAt?: string;
 }
 
 export interface CompareResponse {
