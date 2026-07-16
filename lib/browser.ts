@@ -1,6 +1,11 @@
-import type { Browser } from "playwright-core";
+import type { Browser, BrowserContextOptions } from "playwright-core";
 
 const IS_SERVERLESS = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+
+// Chromium's own flag for the most direct automation tell: with this unset,
+// `navigator.webdriver` is true and CDP-based WAFs (Cloudflare included, per
+// lib/sources/shopier.ts's notes) can detect it before any page JS even runs.
+const STEALTH_LAUNCH_ARGS = ["--disable-blink-features=AutomationControlled"];
 
 /**
  * Launches a short-lived headless Chromium for sites whose bot protection
@@ -34,16 +39,60 @@ export async function launchBrowser(): Promise<{ browser: Browser; cleanup: () =
   const { chromium: playwrightChromium } = await import("playwright-core");
 
   if (!IS_SERVERLESS) {
-    const browser = await playwrightChromium.launch({ headless: true });
+    const browser = await playwrightChromium.launch({ headless: true, args: STEALTH_LAUNCH_ARGS });
     return { browser, cleanup: () => browser.close() };
   }
 
   const chromium = (await import("@sparticuz/chromium")).default;
   const browser = await playwrightChromium.launch({
-    args: chromium.args,
+    args: [...chromium.args, ...STEALTH_LAUNCH_ARGS],
     executablePath: await chromium.executablePath(),
     headless: true,
   });
 
   return { browser, cleanup: () => browser.close() };
 }
+
+/**
+ * Beyond the launch flag, headless Chromium still differs from a real,
+ * human-driven Chrome in ways WAFs commonly probe from page JS: empty
+ * `navigator.plugins`, a `permissions.query("notifications")` mismatch, no
+ * `window.chrome` object, and a software-rendered WebGL vendor string. These
+ * are the standard, widely-documented evasions (the same ones
+ * puppeteer-extra-plugin-stealth ships); patched here as a page-context init
+ * script rather than pulling in a whole stealth-plugin dependency for a
+ * handful of property overrides. No guarantee against a WAF that scores on
+ * network-level signals (e.g. the hosting provider's IP reputation) rather
+ * than browser fingerprint — see lib/sources/shopier.ts's notes.
+ */
+export async function newStealthContext(browser: Browser, options?: BrowserContextOptions) {
+  const context = await browser.newContext(options);
+  await context.addInitScript({ content: STEALTH_INIT_SCRIPT });
+  return context;
+}
+
+const STEALTH_INIT_SCRIPT = `
+(() => {
+  Object.defineProperty(Object.getPrototypeOf(navigator), "webdriver", { get: () => undefined });
+
+  if (!window.chrome) {
+    window.chrome = { runtime: {} };
+  }
+
+  const originalQuery = window.navigator.permissions.query.bind(window.navigator.permissions);
+  window.navigator.permissions.query = (parameters) =>
+    parameters && parameters.name === "notifications"
+      ? Promise.resolve({ state: Notification.permission })
+      : originalQuery(parameters);
+
+  Object.defineProperty(navigator, "plugins", { get: () => [1, 2, 3, 4, 5] });
+  Object.defineProperty(navigator, "languages", { get: () => ["tr-TR", "tr", "en-US", "en"] });
+
+  const getParameter = WebGLRenderingContext.prototype.getParameter;
+  WebGLRenderingContext.prototype.getParameter = function (parameter) {
+    if (parameter === 37445) return "Intel Inc.";
+    if (parameter === 37446) return "Intel Iris OpenGL Engine";
+    return getParameter.call(this, parameter);
+  };
+})();
+`;

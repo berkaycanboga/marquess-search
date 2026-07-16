@@ -1,7 +1,7 @@
 import * as cheerio from "cheerio";
 import type { Page } from "playwright-core";
 import { fetchWithTimeout, sleep, withTimeout, CookieJar, HttpError, BROWSER_USER_AGENT } from "../http";
-import { launchBrowser } from "../browser";
+import { launchBrowser, newStealthContext } from "../browser";
 import { parseTurkishPrice } from "../format";
 import { buildVariant, variantsFromDataAttributes, variantsFromLabeledElements } from "../htmlVariants";
 import { SOURCE_LABELS, type ProductResult, type ProductVariant, type SourceResult } from "../types";
@@ -142,7 +142,14 @@ async function fetchShopierSearchViaHttp(query: string): Promise<{ items: RawSho
 async function fetchShopierSearchViaBrowser(query: string): Promise<RawShopierItem[]> {
   const { browser, cleanup } = await launchBrowser();
   try {
-    const context = await browser.newContext({ userAgent: BROWSER_USER_AGENT });
+    // locale/timezoneId matched to the tr-TR Accept-Language DEFAULT_HEADERS
+    // already sends — a real Turkish visitor wouldn't have these mismatched,
+    // and WAFs do check for that kind of inconsistency.
+    const context = await newStealthContext(browser, {
+      userAgent: BROWSER_USER_AGENT,
+      locale: "tr-TR",
+      timezoneId: "Europe/Istanbul",
+    });
     const page = await context.newPage();
     await page.goto(STORE_URL, { waitUntil: "domcontentloaded", timeout: 20_000 });
     await waitOutCloudflareChallenge(page);
