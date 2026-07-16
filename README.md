@@ -124,6 +124,14 @@ yerimize sayfa yapıyor.
 - **Yerelde test:** `npx playwright install chromium` çalıştırmanız gerekir
   (bkz. yukarıdaki Çalıştırma bölümü); yoksa "Executable doesn't exist" hatası
   alırsınız.
+- **Fault isolation:** `lib/browser.ts`, `playwright-core` ve `@sparticuz/chromium`'u
+  modül seviyesinde değil, `launchBrowser()` çağrıldığı anda (dinamik `import()`
+  ile) yükler. Amaç: bu paketlerle ilgili bir paketleme/uyumluluk sorunu
+  (ör. Vercel'in serverless fonksiyonuna Chromium binary'sinin dahil
+  edilmemesi) yalnızca Shopier kaynağını "erişilemedi" yapsın — tüm siteyi
+  500'e düşürmesin. Yine de tüm sayfa 500 veriyorsa (Shopier'e özel bir hata
+  değil de gerçekten her istek çöküyorsa) Vercel Dashboard → Deployments →
+  ilgili deployment → Functions/Logs'tan gerçek hatayı kontrol edin.
 
 Bu fallback yine de başarısız olursa (ör. Shopier'in WAF'ı headless Chromium'u
 da tespit ederse, ya da bir CAPTCHA/interactive challenge devreye girerse),
