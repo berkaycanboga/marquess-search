@@ -36,6 +36,11 @@ yarn-error.log*
 # vercel
 .vercel
 
+# scripts/shopier-manual-capture.mjs output — a real Chrome profile (session
+# cookies) and a raw HTML dump, neither of which belong in source control.
+/shopier-browser-profile/
+/shopier-page.html
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts
