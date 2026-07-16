@@ -1,5 +1,6 @@
 import * as cheerio from "cheerio";
-import { fetchWithTimeout, sleep, CookieJar, HttpError } from "../http";
+import { fetchWithTimeout, sleep, withTimeout, CookieJar, HttpError, BROWSER_USER_AGENT } from "../http";
+import { launchBrowser } from "../browser";
 import { parseTurkishPrice } from "../format";
 import { buildVariant, variantsFromDataAttributes, variantsFromLabeledElements } from "../htmlVariants";
 import { SOURCE_LABELS, type ProductResult, type ProductVariant, type SourceResult } from "../types";
@@ -11,6 +12,7 @@ const SEARCH_URL = `https://www.shopier.com/s/api/v1/search_product/${STORE_SLUG
 
 const MAX_DETAIL_FETCHES = 5;
 const DETAIL_FETCH_DELAY_MS = 700;
+const BROWSER_FALLBACK_TIMEOUT_MS = 25_000;
 
 interface RawShopierItem {
   id: string;
@@ -25,51 +27,31 @@ export async function searchShopier(query: string): Promise<SourceResult> {
   const label = SOURCE_LABELS.shopier;
 
   try {
-    const jar = new CookieJar();
+    let items: RawShopierItem[];
+    let jar = new CookieJar();
 
-    // Step 1: visit the store page like a real browser, to pick up session
-    // cookies — a bare POST to the search endpoint gets 403/404 (see notes).
-    const homeRes = await fetchWithTimeout(STORE_URL, { headers: { Accept: "text/html" } });
-    jar.absorb(homeRes);
-    if (!homeRes.ok) {
-      throw new HttpError(`Mağaza sayfası ${homeRes.status} döndü`, homeRes.status);
-    }
-    await homeRes.text();
-
-    await sleep(400);
-
-    // Step 2: replicate the store's own search_elasticsearch.js request, with
-    // the session cookie plus Referer/Origin so it looks like it came from the
-    // store page itself.
-    const body = new URLSearchParams({
-      search_query: query,
-      username: STORE_SLUG,
-      search_as_you_type: "true",
-      highlight: "",
-    });
-
-    const searchRes = await fetchWithTimeout(SEARCH_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        Accept: "application/json, text/plain, */*",
-        Referer: STORE_URL,
-        Origin: "https://www.shopier.com",
-        ...(jar.size > 0 ? { Cookie: jar.header() } : {}),
-      },
-      body: body.toString(),
-    });
-    jar.absorb(searchRes);
-
-    if (!searchRes.ok) {
-      throw new HttpError(
-        `Arama isteği ${searchRes.status} döndü — Shopier bu uçta muhtemelen ek bir bot/oturum kontrolü ` +
-          `yapıyor (bkz. proje notları). Cookie/Referer denendi; olmazsa headless browser (Playwright) gerekebilir.`,
-        searchRes.status,
-      );
+    try {
+      const httpResult = await fetchShopierSearchViaHttp(query);
+      items = httpResult.items;
+      jar = httpResult.jar;
+    } catch (httpErr) {
+      // Plain HTTP got blocked (see notes: Shopier's WAF appears to fingerprint
+      // at the TLS/JS level, not just headers) — fall back to a real headless
+      // browser, which carries a genuine browser fingerprint. See lib/browser.ts.
+      try {
+        items = await withTimeout(
+          fetchShopierSearchViaBrowser(query),
+          BROWSER_FALLBACK_TIMEOUT_MS,
+          `Headless browser denemesi ${BROWSER_FALLBACK_TIMEOUT_MS}ms içinde tamamlanamadı`,
+        );
+      } catch (browserErr) {
+        const httpMsg = httpErr instanceof Error ? httpErr.message : "istek başarısız";
+        const browserMsg = browserErr instanceof Error ? browserErr.message : "bilinmeyen hata";
+        throw new HttpError(`${httpMsg} — headless browser denemesi de başarısız oldu: ${browserMsg}`);
+      }
     }
 
-    const rawItems = (await extractShopierItems(searchRes)).slice(0, 20);
+    const rawItems = items.slice(0, 20);
 
     const settled = await Promise.allSettled(
       rawItems.map(async (item, i) => {
@@ -104,6 +86,99 @@ export async function searchShopier(query: string): Promise<SourceResult> {
     };
   }
 }
+
+// --- search: plain HTTP (fast path) ------------------------------------------
+
+async function fetchShopierSearchViaHttp(query: string): Promise<{ items: RawShopierItem[]; jar: CookieJar }> {
+  const jar = new CookieJar();
+
+  // Visit the store page like a real browser, to pick up session cookies —
+  // a bare POST to the search endpoint gets 403/404 (see notes).
+  const homeRes = await fetchWithTimeout(STORE_URL, { headers: { Accept: "text/html" } });
+  jar.absorb(homeRes);
+  if (!homeRes.ok) {
+    throw new HttpError(`Mağaza sayfası ${homeRes.status} döndü`, homeRes.status);
+  }
+  await homeRes.text();
+
+  await sleep(400);
+
+  // Replicate the store's own search_elasticsearch.js request, with the
+  // session cookie plus Referer/Origin so it looks like it came from the
+  // store page itself.
+  const body = new URLSearchParams({
+    search_query: query,
+    username: STORE_SLUG,
+    search_as_you_type: "true",
+    highlight: "",
+  });
+
+  const searchRes = await fetchWithTimeout(SEARCH_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      Accept: "application/json, text/plain, */*",
+      Referer: STORE_URL,
+      Origin: "https://www.shopier.com",
+      ...(jar.size > 0 ? { Cookie: jar.header() } : {}),
+    },
+    body: body.toString(),
+  });
+  jar.absorb(searchRes);
+
+  if (!searchRes.ok) {
+    throw new HttpError(`Arama isteği ${searchRes.status} döndü`, searchRes.status);
+  }
+
+  const text = await searchRes.text();
+  return { items: parseShopierSearchPayload(text), jar };
+}
+
+// --- search: headless browser (fallback path) --------------------------------
+
+async function fetchShopierSearchViaBrowser(query: string): Promise<RawShopierItem[]> {
+  const { browser, cleanup } = await launchBrowser();
+  try {
+    const context = await browser.newContext({ userAgent: BROWSER_USER_AGENT });
+    const page = await context.newPage();
+    await page.goto(STORE_URL, { waitUntil: "domcontentloaded", timeout: 20_000 });
+
+    const requestBody = new URLSearchParams({
+      search_query: query,
+      username: STORE_SLUG,
+      search_as_you_type: "true",
+      highlight: "",
+    }).toString();
+
+    // Let the real page (real TLS/JS fingerprint, real cookies) issue the same
+    // request search_elasticsearch.js would — we just read the response back
+    // out, reusing the exact same parsing as the plain-HTTP path.
+    const result = await page.evaluate(
+      async ({ url, requestBody }) => {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+            Accept: "application/json, text/plain, */*",
+          },
+          body: requestBody,
+        });
+        return { status: res.status, text: await res.text() };
+      },
+      { url: SEARCH_URL, requestBody },
+    );
+
+    if (result.status < 200 || result.status >= 300) {
+      throw new HttpError(`Arama isteği (headless browser) ${result.status} döndü`, result.status);
+    }
+
+    return parseShopierSearchPayload(result.text);
+  } finally {
+    await cleanup();
+  }
+}
+
+// --- product detail (variant) hydration --------------------------------------
 
 async function hydrateShopierProduct(item: RawShopierItem, jar: CookieJar): Promise<ProductResult> {
   const res = await fetchWithTimeout(item.url!, {
@@ -154,8 +229,7 @@ function shopierItemToProduct(item: RawShopierItem, variants: ProductVariant[]):
  * against SEARCH_URL (with network access) to see the actual body and adjust
  * `findCandidateArrays`/`normalizeShopierItem` below.
  */
-async function extractShopierItems(res: Response): Promise<RawShopierItem[]> {
-  const text = await res.text();
+function parseShopierSearchPayload(text: string): RawShopierItem[] {
   let data: unknown;
   try {
     data = JSON.parse(text);

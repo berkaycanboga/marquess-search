@@ -2,6 +2,9 @@
   "name": "marquess-search",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": "22.x"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -10,8 +13,10 @@
     "inspect": "node scripts/inspect.mjs"
   },
   "dependencies": {
+    "@sparticuz/chromium": "^149.0.0",
     "cheerio": "^1.2.0",
     "next": "16.2.10",
+    "playwright-core": "^1.61.1",
     "react": "19.2.4",
     "react-dom": "19.2.4"
   },

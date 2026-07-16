@@ -3,6 +3,11 @@ import { SearchBar } from "@/components/SearchBar";
 import { CompareResults } from "@/components/CompareResults";
 import { ResultsSkeleton } from "@/components/ResultsSkeleton";
 
+// This page calls searchAllSources() directly (see CompareResults), which can
+// invoke the Shopier headless-browser fallback — see app/api/compare/route.ts
+// for why this needs more than the default execution budget.
+export const maxDuration = 60;
+
 export default async function Home({
   searchParams,
 }: {

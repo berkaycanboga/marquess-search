@@ -17,6 +17,13 @@ npm run dev
 
 `npm run build && npm run start` production modu için.
 
+Yerelde Shopier'in headless-browser fallback'ini (aşağıya bakın) test etmek
+isterseniz bir kere şunu çalıştırmanız gerekir:
+
+```bash
+npx playwright install chromium
+```
+
 ## Mimari
 
 ```
@@ -28,12 +35,16 @@ lib/
   types.ts               ortak veri modeli (ProductVariant, SourceResult, ...)
   format.ts               TL/gram parse+format yardımcıları
   http.ts                  fetch+timeout, Shopier için cookie jar
+  browser.ts               Shopier fallback'i için headless Chromium başlatıcı
+                           (Vercel'de @sparticuz/chromium, yerelde Playwright'ın
+                           kendi kurduğu Chromium)
   htmlVariants.ts          esans.com.tr + Shopier ürün sayfaları için ortak,
                            site-agnostik varyant çıkarma stratejileri
   normalize.ts             kaynaklardan gelen sonuçları tek listede birleştirme
   sources/esans.ts         esans.com.tr — düz HTML + JSON-LD parse
   sources/felicita.ts      Felicita — api.felicitafragrances.com REST client
-  sources/shopier.ts       Shopier — cookie/Referer akışı + esnek JSON parse
+  sources/shopier.ts       Shopier — düz HTTP (cookie/Referer) önce, olmazsa
+                           headless browser; esnek JSON parse
 scripts/inspect.mjs        canlı bir URL'in HTML/JSON yapısını dökmek için
                            bağımsız teşhis aracı (bkz. aşağıda)
 ```
@@ -48,31 +59,29 @@ Bu iki birim yoğunluk bilgisi olmadan doğru şekilde birbirine çevrilemez, bu
 yüzden uygulama bunları ayrı tablolarda gösterir ve otomatik ₺/gram ↔ ₺/ml
 kıyaslaması **yapmaz**.
 
-## ÖNEMLİ — bu kod canlı sitelere karşı doğrulanamadı
+## Canlı doğrulama durumu
 
-Bu proje, bu ortamda (kurumsal egress proxy) esans.com.tr,
-api.felicitafragrances.com ve shopier.com'a doğrudan ağ erişimi mümkün
-olmadığı için **canlı HTML/JSON çıktısı görülmeden**, yalnızca elle çıkarılmış
-teknik notlara dayanarak yazıldı. Şunlar gerçek ağınız olan bir makineden
-doğrulanmalı:
+Bu ortamda (kurumsal egress proxy) esans.com.tr, api.felicitafragrances.com ve
+shopier.com'a doğrudan ağ erişimi yok, o yüzden kod büyük ölçüde elle
+çıkarılmış teknik notlara dayanarak yazıldı — ama Vercel'e deploy edilip gerçek
+ortamda denendi ve şu an bilinen durum:
 
-1. **esans.com.tr** — arama sayfası JSON-LD `Product` şeması içeriyorsa
-   (`lib/sources/esans.ts` → `extractCardsFromJsonLd`) sorunsuz çalışır;
-   içermiyorsa heuristik CSS taramasına (`extractCardsHeuristically`) düşer,
-   bu daha kırılgandır. Ürün detay sayfasındaki gram/kalite tablosu için
-   aynı şekilde JSON-LD → `data-*` → genel liste-eleman taraması sırasıyla
-   denenir (`htmlVariants.ts`).
-2. **Felicita** — API şekli notlarda tam olarak verildiği için bu kaynağın
-   çalışma ihtimali en yüksek.
-3. **Shopier** — arama endpoint'inin **gerçek response şekli notlarda yoktu**
-   (sadece request formatı reverse-engineer edilmişti). `shopier.ts` birkaç
-   olası JSON şeklini dener (`result`/`data`/`products`/Elasticsearch
-   `hits.hits`); gerçek cevap bunlardan biri değilse `findCandidateArrays`/
-   `normalizeShopierItem` fonksiyonlarını gerçek veriye göre güncelleyin.
-   Cookie/Referer/Origin akışı da hâlâ 403/404 dönerse notlardaki gibi
-   headless browser (Playwright, ki bu ortamda zaten kurulu) fallback'ine
-   geçmek gerekebilir — bilinçli olarak eklenmedi, sonuç kalitesi
-   doğrulanamadan bir "her zaman çalışır" görünümü vermemek için.
+- ✅ **esans.com.tr** ve **Felicita** — arama sonuçları (isim/fiyat/gram/kalite)
+  doğru geliyor.
+- ⚠️ **Ürün linkleri (esans.com.tr + Felicita) yanlış** — bilinen, henüz
+  düzeltilmemiş hata. Felicita'da her ürün aynı (sabit) adrese gidiyor çünkü
+  gerçek SPA rotası notlarda yoktu ve `felicita.ts` sadece kategori sayfasına
+  tahmini bir link üretiyor. esans.com.tr'de link üretimi muhtemelen
+  `extractCardsHeuristically` (JSON-LD bulunamadığında devreye giren, daha
+  kırılgan CSS taraması) yanlış anchor'ı seçiyor. Kesin düzeltme için gerçek
+  ürün URL'lerine ihtiyaç var (bkz. Teşhis aracı).
+- ⚠️ **Shopier (John Lucas) — mağaza sayfası bile 403 dönüyor.** Bu, notlardaki
+  tahminin ötesinde bir koruma: yalnızca arama endpoint'i değil, düz `fetch()`
+  ile yapılan sıradan sayfa GET'i bile bloklanıyor — büyük ihtimalle WAF, Node
+  `fetch()`'in gerçek Chrome'dan farklı TLS/HTTP parmak izine bakıyor; bu
+  header/cookie eklemekle çözülemez. Bu yüzden `shopier.ts` artık düz HTTP
+  başarısız olursa **gerçek bir headless Chromium'a** (`lib/browser.ts`) düşüyor
+  — bkz. aşağıdaki "Shopier headless-browser fallback" bölümü.
 
 ### Teşhis aracı
 
@@ -86,8 +95,41 @@ npm run inspect -- "https://www.shopier.com/s/api/v1/search_product/jlfragrances
 
 Bu komut JSON-LD bloklarını, `data-price`/`data-fiyat` elemanlarını, "gram"+
 "fiyat" geçen `<script>` bloklarını ve TL/₺ içeren liste elemanlarını
-ekrana döker — parser'ları gerçek markup'a göre ayarlamak için başlangıç
-noktası budur.
+ekrana döker — parser'ları/link üretimini gerçek markup'a göre ayarlamak için
+başlangıç noktası budur.
+
+## Shopier headless-browser fallback
+
+`lib/sources/shopier.ts` önce düz HTTP dener (hızlı, ucuz); başarısız olursa
+`lib/browser.ts` üzerinden gerçek bir Chromium açıp mağaza sayfasını ziyaret
+eder ve arama isteğini **sayfanın kendi JS bağlamı içinden** (`page.evaluate`
++ `fetch`) yapar — böylece gerçek tarayıcı TLS/JS parmak izini taşır. Bu,
+notlardaki son çare önerisinin ("gerçek arama kutusunu doldurup DOM'dan oku")
+daha hafif bir versiyonu: aynı JSON API'yi kullanıyoruz, sadece isteği bizim
+yerimize sayfa yapıyor.
+
+**Vercel'de dikkat edilmesi gerekenler:**
+
+- **Node.js sürümü:** `@sparticuz/chromium` Node 22.17+ istiyor;
+  `package.json` içine `"engines": {"node": "22.x"}` eklendi, Vercel bunu
+  otomatik okur. Proje ayarlarında farklı bir Node sürümü sabitlenmişse
+  (Settings → General → Node.js Version) 22.x'e çekin.
+- **Süre/bellek limitleri:** Headless Chromium açmak sıradan bir `fetch()`'ten
+  çok daha yavaş ve bellek aç (`@sparticuz/chromium` en az 512MB, 1600MB+
+  öneriyor). `maxDuration = 60` route'lara eklendi ama Vercel bunu planınızın
+  (Hobby/Pro/Fluid Compute) izin verdiği üst sınıra kadar uygular — Shopier
+  fallback'i sürekli zaman aşımına uğrarsa Vercel Dashboard → Settings →
+  Functions'tan süre/bellek limitlerinizi kontrol edin, gerekirse
+  `vercel.json`'da `functions` alanıyla artırın.
+- **Yerelde test:** `npx playwright install chromium` çalıştırmanız gerekir
+  (bkz. yukarıdaki Çalıştırma bölümü); yoksa "Executable doesn't exist" hatası
+  alırsınız.
+
+Bu fallback yine de başarısız olursa (ör. Shopier'in WAF'ı headless Chromium'u
+da tespit ederse, ya da bir CAPTCHA/interactive challenge devreye girerse),
+kasıtlı olarak daha fazla zorlamıyoruz — o noktada Shopier kaynağı
+"erişilemedi" gösterir, diğer iki kaynak çalışmaya devam eder. CAPTCHA çözme
+gibi aktif tespit-atlatma yöntemleri eklenmedi.
 
 ## Diğer notlar
 

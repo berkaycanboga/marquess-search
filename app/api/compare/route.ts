@@ -3,6 +3,13 @@ import { searchAllSources } from "@/lib/sources";
 import { TtlCache } from "@/lib/cache";
 import type { CompareResponse } from "@/lib/types";
 
+// The Shopier client can fall back to a headless-browser launch (see
+// lib/browser.ts) when plain HTTP gets blocked — that's slower than a normal
+// fetch, so give this route more headroom than the platform default. Vercel
+// clamps this to whatever your plan/compute mode actually allows — check
+// Settings → Functions if the Shopier fallback keeps timing out; see README.
+export const maxDuration = 60;
+
 // Keeps repeat/duplicate searches from re-hitting the source sites — also
 // acts as a light shield against the bot-detection concerns in the project
 // notes (esans rate limits, Shopier's search endpoint is picky).

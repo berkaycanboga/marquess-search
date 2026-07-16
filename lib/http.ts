@@ -1,8 +1,9 @@
 /**
- * Shared HTTP helpers for the source clients. We deliberately avoid a headless
- * browser (see project notes) and instead mimic a real Chrome session closely
- * enough for esans.com.tr and Felicita, which don't need it. Shopier's search
- * endpoint appears to gate on session cookies + Referer/Origin (see shopier.ts).
+ * Shared HTTP helpers for the source clients. Plain fetch() with a realistic
+ * UA/Accept-Language is enough for esans.com.tr and Felicita. Shopier's WAF
+ * blocks plain HTTP outright (TLS/JS fingerprinting, not just headers/cookies)
+ * so it falls back to a real headless browser — see lib/browser.ts and
+ * lib/sources/shopier.ts.
  */
 
 export const BROWSER_USER_AGENT =
@@ -48,6 +49,19 @@ export async function fetchWithTimeout(
 
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Races a promise against a hard deadline, e.g. to bound a headless-browser flow. */
+export async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new HttpError(message)), timeoutMs);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer!);
+  }
 }
 
 /** Reads all Set-Cookie values from a fetch Response, across runtimes. */
