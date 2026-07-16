@@ -146,40 +146,112 @@ async function fetchShopierSearchViaBrowser(query: string): Promise<RawShopierIt
     await page.goto(STORE_URL, { waitUntil: "domcontentloaded", timeout: 20_000 });
     await dismissPopup(page);
 
-    const requestBody = new URLSearchParams({
-      search_query: query,
-      username: STORE_SLUG,
-      search_as_you_type: "true",
-      highlight: "",
-    }).toString();
-
-    // Let the real page (real TLS/JS fingerprint, real cookies) issue the same
-    // request search_elasticsearch.js would — we just read the response back
-    // out, reusing the exact same parsing as the plain-HTTP path.
-    const result = await page.evaluate(
-      async ({ url, requestBody }) => {
-        const res = await fetch(url, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/x-www-form-urlencoded",
-            Accept: "application/json, text/plain, */*",
-            "X-Requested-With": "XMLHttpRequest",
-          },
-          body: requestBody,
-        });
-        return { status: res.status, text: await res.text() };
-      },
-      { url: SEARCH_URL, requestBody },
-    );
-
-    if (result.status < 200 || result.status >= 300) {
-      throw new HttpError(`Arama isteği (headless browser) ${result.status} döndü`, result.status);
+    try {
+      return await searchViaRealInput(page, query);
+    } catch (inputErr) {
+      try {
+        return await searchViaDirectFetch(page, query);
+      } catch (fetchErr) {
+        const inputMsg = inputErr instanceof Error ? inputErr.message : "bilinmeyen hata";
+        const fetchMsg = fetchErr instanceof Error ? fetchErr.message : "bilinmeyen hata";
+        throw new HttpError(`gerçek arama kutusu denemesi başarısız (${inputMsg}); doğrudan istek denemesi de başarısız (${fetchMsg})`);
+      }
     }
-
-    return parseShopierSearchPayload(result.text);
   } finally {
     await cleanup();
   }
+}
+
+/**
+ * Types into the store's own search box and reads back whatever response its
+ * own search_elasticsearch.js triggers, instead of us reconstructing the
+ * request — the notes' recommended last resort. This sidesteps any hidden
+ * token/signature the site's JS might attach that a hand-built fetch()
+ * wouldn't have. Selector list is a best-effort guess (unverified against
+ * live markup); if it doesn't match, share the search box's real HTML
+ * (view-source, Ctrl+F "search") to pin down an exact selector.
+ */
+async function searchViaRealInput(page: Page, query: string): Promise<RawShopierItem[]> {
+  const inputSelectors = [
+    'input[type="search"]',
+    'input[name*="search" i]',
+    'input[id*="search" i]',
+    'input[placeholder*="ara" i]',
+    'input[placeholder*="search" i]',
+    '[class*="search"] input',
+  ];
+
+  let input = null;
+  for (const selector of inputSelectors) {
+    const locator = page.locator(selector).first();
+    if ((await locator.count().catch(() => 0)) > 0) {
+      input = locator;
+      break;
+    }
+  }
+  if (!input) {
+    throw new HttpError("Arama kutusu bulunamadı (bilinen seçicilerle eşleşmedi)");
+  }
+
+  // Attach the listener before typing: "search as you type" debounces on the
+  // last keystroke, so the request matching the *complete* query could fire
+  // either during or right after typing — filtering on postData rather than
+  // just being "the first response" avoids matching an earlier partial-query
+  // request (e.g. one fired after just "i" or "ima").
+  const responsePromise = page.waitForResponse(
+    (res) =>
+      res.url().includes("/search_product/") &&
+      res.request().method() === "POST" &&
+      (res.request().postData() ?? "").includes(encodeURIComponent(query)),
+    { timeout: 15_000 },
+  );
+
+  await input.click({ timeout: 5000 });
+  await input.fill("").catch(() => {});
+  await input.pressSequentially(query, { delay: 80, timeout: 15_000 });
+
+  const response = await responsePromise;
+  if (!response.ok()) {
+    throw new HttpError(`Arama isteği (gerçek kutu) ${response.status()} döndü`, response.status());
+  }
+  return parseShopierSearchPayload(await response.text());
+}
+
+/**
+ * Fallback when the real search box isn't found: fire the same request
+ * search_elasticsearch.js would, from within the page's own JS context (real
+ * TLS/JS fingerprint, real cookies) — reuses the exact same parsing as the
+ * plain-HTTP path.
+ */
+async function searchViaDirectFetch(page: Page, query: string): Promise<RawShopierItem[]> {
+  const requestBody = new URLSearchParams({
+    search_query: query,
+    username: STORE_SLUG,
+    search_as_you_type: "true",
+    highlight: "",
+  }).toString();
+
+  const result = await page.evaluate(
+    async ({ url, requestBody }) => {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          Accept: "application/json, text/plain, */*",
+          "X-Requested-With": "XMLHttpRequest",
+        },
+        body: requestBody,
+      });
+      return { status: res.status, text: await res.text() };
+    },
+    { url: SEARCH_URL, requestBody },
+  );
+
+  if (result.status < 200 || result.status >= 300) {
+    throw new HttpError(`Arama isteği (headless browser) ${result.status} döndü`, result.status);
+  }
+
+  return parseShopierSearchPayload(result.text);
 }
 
 /**
