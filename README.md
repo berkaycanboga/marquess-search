@@ -68,20 +68,27 @@ ortamda denendi ve şu an bilinen durum:
 
 - ✅ **esans.com.tr** ve **Felicita** — arama sonuçları (isim/fiyat/gram/kalite)
   doğru geliyor.
-- ⚠️ **Ürün linkleri (esans.com.tr + Felicita) yanlış** — bilinen, henüz
-  düzeltilmemiş hata. Felicita'da her ürün aynı (sabit) adrese gidiyor çünkü
-  gerçek SPA rotası notlarda yoktu ve `felicita.ts` sadece kategori sayfasına
-  tahmini bir link üretiyor. esans.com.tr'de link üretimi muhtemelen
-  `extractCardsHeuristically` (JSON-LD bulunamadığında devreye giren, daha
-  kırılgan CSS taraması) yanlış anchor'ı seçiyor. Kesin düzeltme için gerçek
-  ürün URL'lerine ihtiyaç var (bkz. Teşhis aracı).
+- ✅ **Felicita ürün linki düzeltildi** — gerçek route (`/products/{id}`)
+  kullanıcı tarafından doğrulanıp bildirildi, `felicita.ts` artık buna göre
+  link üretiyor.
+- ⚠️ **esans.com.tr link + gram/kalite tablosu hâlâ boş çıkıyor** (yalnızca
+  "Liste fiyatı" fallback'i görünüyor). Muhtemel sebep: arama sayfasının
+  JSON-LD'si `ItemList`+`ListItem` deseninde ve URL, iç içteki `Product`
+  değil `ListItem` üzerinde duruyor (düzeltildi — URL artık miras alınıyor),
+  ya da site JSON-LD yerine schema.org microdata (`itemprop="url"/"price"`)
+  kullanıyor (bunun için de ayrı bir çıkarım stratejisi eklendi). Bunlar
+  canlıda doğrulanamadı — hâlâ boş geliyorsa `npm run inspect` çıktısını
+  paylaşın, kesin sebebi görüp seçicileri buna göre ayarlarız.
 - ⚠️ **Shopier (John Lucas) — mağaza sayfası bile 403 dönüyor.** Bu, notlardaki
   tahminin ötesinde bir koruma: yalnızca arama endpoint'i değil, düz `fetch()`
   ile yapılan sıradan sayfa GET'i bile bloklanıyor — büyük ihtimalle WAF, Node
   `fetch()`'in gerçek Chrome'dan farklı TLS/HTTP parmak izine bakıyor; bu
   header/cookie eklemekle çözülemez. Bu yüzden `shopier.ts` artık düz HTTP
   başarısız olursa **gerçek bir headless Chromium'a** (`lib/browser.ts`) düşüyor
-  — bkz. aşağıdaki "Shopier headless-browser fallback" bölümü.
+  — bkz. aşağıdaki "Shopier headless-browser fallback" bölümü. Mağaza sayfası
+  ilk girişte bir indirim/kayıt popup'ı gösteriyor; headless akış bunu
+  kapatmayı dener (`dismissPopup`, genel/tahmini seçicilerle + son çare
+  olarak Escape tuşu) ama gerçek markup doğrulanamadı.
 
 ### Teşhis aracı
 

@@ -1,4 +1,5 @@
 import * as cheerio from "cheerio";
+import type { Page } from "playwright-core";
 import { fetchWithTimeout, sleep, withTimeout, CookieJar, HttpError, BROWSER_USER_AGENT } from "../http";
 import { launchBrowser } from "../browser";
 import { parseTurkishPrice } from "../format";
@@ -142,6 +143,7 @@ async function fetchShopierSearchViaBrowser(query: string): Promise<RawShopierIt
     const context = await browser.newContext({ userAgent: BROWSER_USER_AGENT });
     const page = await context.newPage();
     await page.goto(STORE_URL, { waitUntil: "domcontentloaded", timeout: 20_000 });
+    await dismissPopup(page);
 
     const requestBody = new URLSearchParams({
       search_query: query,
@@ -176,6 +178,37 @@ async function fetchShopierSearchViaBrowser(query: string): Promise<RawShopierIt
   } finally {
     await cleanup();
   }
+}
+
+/**
+ * Shopier stores commonly show a discount/newsletter popup on first visit.
+ * It doesn't block the fetch() call made from page.evaluate below, but it can
+ * leave the page in a state a real, fully-loaded session wouldn't be in — so
+ * we make a best-effort attempt to close it like a real visitor would before
+ * issuing the search request. Selectors are generic guesses (unverified
+ * against the live markup, see scripts/inspect.mjs); Escape is a cheap,
+ * safe fallback that closes most modal implementations regardless of markup.
+ */
+async function dismissPopup(page: Page): Promise<void> {
+  await page.waitForTimeout(1200);
+
+  const closeSelectors = [
+    'button[aria-label="Kapat" i]',
+    'button[aria-label="close" i]',
+    '[class*="modal"] [class*="close"]',
+    '[class*="popup"] [class*="close"]',
+    '[class*="overlay"] [class*="close"]',
+  ];
+
+  for (const selector of closeSelectors) {
+    const locator = page.locator(selector).first();
+    if ((await locator.count().catch(() => 0)) > 0) {
+      await locator.click({ timeout: 1000 }).catch(() => {});
+      return;
+    }
+  }
+
+  await page.keyboard.press("Escape").catch(() => {});
 }
 
 // --- product detail (variant) hydration --------------------------------------

@@ -104,10 +104,7 @@ async function fetchFelicitaProduct(id: string): Promise<ProductResult | null> {
     id,
     source: "felicita",
     name: data.nameTr ?? data.name ?? children[0]?.name ?? "İsimsiz ürün",
-    // The SPA's exact product-detail route wasn't captured in the source notes
-    // (only the API paths were). This deep-links to the category+search view,
-    // which we know accepts a `category` query param from the original URL.
-    url: `https://www.felicitafragrances.com/?category=${ESANS_CATEGORY_ID}`,
+    url: `https://www.felicitafragrances.com/products/${id}`,
     variants,
   };
 }

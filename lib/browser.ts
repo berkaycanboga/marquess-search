@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-import { rm } from "node:fs/promises";
 import type { Browser } from "playwright-core";
 
 const IS_SERVERLESS = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
@@ -23,10 +21,14 @@ const IS_SERVERLESS = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCT
  * time and take down every route that imports lib/sources/shopier.ts, which
  * is what a top-level `import ... from "playwright-core"` would risk.
  *
- * Caller MUST call the returned `cleanup()` when done (closes the browser and,
- * on serverless, removes its temp profile dir — warm containers reuse /tmp
- * across invocations and Playwright doesn't clean up after itself, see
- * https://github.com/Sparticuz/chromium#playwright-lambda-tmp-fills-up-after-repeated-invocations).
+ * We deliberately do NOT pass a custom `--user-data-dir` here: newer
+ * playwright-core versions reject it on `launch()` ("Pass userDataDir
+ * parameter to browserType.launchPersistentContext(...) instead"), which
+ * crashed every invocation in production. That means a long-running warm
+ * Lambda/Vercel container could in theory accumulate Playwright's own default
+ * temp profile dirs under /tmp over many invocations — acceptable for now
+ * (each is small and `browser.close()` normally cleans its own up); revisit
+ * with `launchPersistentContext` if that's ever actually observed.
  */
 export async function launchBrowser(): Promise<{ browser: Browser; cleanup: () => Promise<void> }> {
   const { chromium: playwrightChromium } = await import("playwright-core");
@@ -37,18 +39,11 @@ export async function launchBrowser(): Promise<{ browser: Browser; cleanup: () =
   }
 
   const chromium = (await import("@sparticuz/chromium")).default;
-  const userDataDir = `/tmp/pw-${randomUUID()}`;
   const browser = await playwrightChromium.launch({
-    args: [...chromium.args, `--user-data-dir=${userDataDir}`],
+    args: chromium.args,
     executablePath: await chromium.executablePath(),
     headless: true,
   });
 
-  return {
-    browser,
-    cleanup: async () => {
-      await browser.close();
-      await rm(userDataDir, { recursive: true, force: true }).catch(() => {});
-    },
-  };
+  return { browser, cleanup: () => browser.close() };
 }

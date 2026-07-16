@@ -73,6 +73,41 @@ export function variantsFromDataAttributes($: CheerioAPI): ProductVariant[] | nu
 }
 
 /**
+ * schema.org microdata (`itemtype="...Offer"` with `itemprop="price"`), the
+ * HTML-attribute sibling of JSON-LD — common on older e-ticaret platforms
+ * (predating/alongside JSON-LD) that plain-object JSON-LD parsing won't see.
+ */
+export function variantsFromMicrodataOffers($: CheerioAPI): ProductVariant[] | null {
+  const offers = $('[itemtype*="Offer" i]');
+  if (offers.length === 0) return null;
+
+  const variants: ProductVariant[] = [];
+  offers.each((_, el) => {
+    const $el = $(el);
+    const priceRaw =
+      $el.find('[itemprop="price"]').first().attr("content") ??
+      $el.find('[itemprop="price"]').first().text() ??
+      $el.attr("content");
+    const price = priceRaw ? parseTurkishPrice(String(priceRaw)) : null;
+    if (price == null) return;
+
+    const labelSource =
+      $el.find('[itemprop="name"]').first().text() ||
+      $el.find('[itemprop="sku"]').first().text() ||
+      $el.text();
+    const amountUnit = parseAmountUnit(labelSource);
+    if (!amountUnit) return;
+
+    const quality = extractQuality(labelSource);
+    variants.push(
+      buildVariant(labelSource.trim() || `${amountUnit.amount} ${amountUnit.unit}`, amountUnit.amount, amountUnit.unit, price, quality),
+    );
+  });
+
+  return variants.length > 0 ? dedupeVariants(variants) : null;
+}
+
+/**
  * Last-resort, site-agnostic fallback: scans common option/list containers for
  * elements whose text contains both an amount+unit ("100 GRAM" / "50 ML") and a
  * price ("450,00 TL"). We couldn't verify live markup from this environment

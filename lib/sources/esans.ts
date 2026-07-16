@@ -10,6 +10,7 @@ import {
   dedupeVariants,
   variantsFromDataAttributes,
   variantsFromLabeledElements,
+  variantsFromMicrodataOffers,
 } from "../htmlVariants";
 
 const BASE_URL = "https://www.esans.com.tr";
@@ -44,7 +45,7 @@ export async function searchEsans(query: string): Promise<SourceResult> {
     const html = await res.text();
     const $ = cheerio.load(html);
 
-    const cards = extractCardsFromJsonLd($) ?? extractCardsHeuristically($);
+    const cards = extractCardsFromJsonLd($) ?? extractCardsFromMicrodata($) ?? extractCardsHeuristically($);
 
     const products: ProductResult[] = [];
     let degraded = false;
@@ -107,6 +108,7 @@ async function fetchEsansVariants(productUrl: string): Promise<ProductVariant[]>
 
   return (
     variantsFromJsonLdOffers($) ??
+    variantsFromMicrodataOffers($) ??
     variantsFromDataAttributes($) ??
     variantsFromLabeledElements($) ??
     []
@@ -131,9 +133,9 @@ function extractCardsFromJsonLd($: CheerioAPI): RawCard[] | null {
   return products.length > 0 ? dedupeCardsByUrl(products) : null;
 }
 
-function collectProductNodes(node: unknown, out: RawCard[]): void {
+function collectProductNodes(node: unknown, out: RawCard[], inheritedUrl?: string): void {
   if (Array.isArray(node)) {
-    for (const item of node) collectProductNodes(item, out);
+    for (const item of node) collectProductNodes(item, out, inheritedUrl);
     return;
   }
   if (!node || typeof node !== "object") return;
@@ -142,22 +144,27 @@ function collectProductNodes(node: unknown, out: RawCard[]): void {
   const type = obj["@type"];
   const typeStr = Array.isArray(type) ? type.join(",") : String(type ?? "");
   if (typeStr.includes("Product")) {
-    const card = productNodeToCard(obj);
+    const card = productNodeToCard(obj, inheritedUrl);
     if (card) out.push(card);
   }
 
+  // In the common ItemList+ListItem+Product pattern, the per-item canonical
+  // URL lives on the ListItem wrapper (obj.url here), not necessarily on the
+  // nested Product — propagate it down so productNodeToCard can still use it.
+  const ownUrl = typeof obj.url === "string" ? obj.url : inheritedUrl;
+
   if (Array.isArray(obj.itemListElement)) {
-    for (const el of obj.itemListElement as unknown[]) collectProductNodes(el, out);
+    for (const el of obj.itemListElement as unknown[]) collectProductNodes(el, out, ownUrl);
   }
-  if (obj.item) collectProductNodes(obj.item, out);
+  if (obj.item) collectProductNodes(obj.item, out, ownUrl);
   if (Array.isArray(obj["@graph"])) {
-    for (const el of obj["@graph"] as unknown[]) collectProductNodes(el, out);
+    for (const el of obj["@graph"] as unknown[]) collectProductNodes(el, out, ownUrl);
   }
 }
 
-function productNodeToCard(obj: Record<string, unknown>): RawCard | null {
+function productNodeToCard(obj: Record<string, unknown>, inheritedUrl?: string): RawCard | null {
   const name = typeof obj.name === "string" ? obj.name.trim() : undefined;
-  const rawUrl = typeof obj.url === "string" ? obj.url : undefined;
+  const rawUrl = typeof obj.url === "string" ? obj.url : inheritedUrl;
   if (!name || !rawUrl) return null;
   const url = absolutize(rawUrl);
 
@@ -183,6 +190,44 @@ function productNodeToCard(obj: Record<string, unknown>): RawCard | null {
     inStock,
     quality: extractQuality(name),
   };
+}
+
+/**
+ * schema.org microdata (itemtype="...Product" with itemprop attributes) —
+ * common on older e-ticaret platforms as an alternative/complement to
+ * JSON-LD, and not something DOM-text heuristics would reliably find.
+ */
+function extractCardsFromMicrodata($: CheerioAPI): RawCard[] | null {
+  const nodes = $('[itemtype*="Product" i]');
+  if (nodes.length === 0) return null;
+
+  const cards: RawCard[] = [];
+  nodes.each((_, el) => {
+    const $el = $(el);
+    const name = $el.find('[itemprop="name"]').first().text().trim();
+    if (!name) return;
+
+    let href = $el.find('[itemprop="url"]').first().attr("href");
+    if (!href && $el.is("a[href]")) href = $el.attr("href");
+    if (!href) href = $el.find("a[href]").first().attr("href");
+    if (!href) return;
+
+    const priceEl = $el.find('[itemprop="price"]').first();
+    const priceRaw = priceEl.attr("content") ?? priceEl.text();
+    const price = priceRaw ? (parseTurkishPrice(priceRaw) ?? undefined) : undefined;
+
+    const imgSrc = $el.find("img").first().attr("src");
+
+    cards.push({
+      name,
+      url: absolutize(href),
+      imageUrl: imgSrc ? absolutize(imgSrc) : undefined,
+      price,
+      quality: extractQuality(name),
+    });
+  });
+
+  return cards.length > 0 ? dedupeCardsByUrl(cards) : null;
 }
 
 function extractCardsHeuristically($: CheerioAPI): RawCard[] {
