@@ -13,7 +13,7 @@ const SEARCH_URL = `https://www.shopier.com/s/api/v1/search_product/${STORE_SLUG
 
 const MAX_DETAIL_FETCHES = 5;
 const DETAIL_FETCH_DELAY_MS = 700;
-const BROWSER_FALLBACK_TIMEOUT_MS = 25_000;
+const BROWSER_FALLBACK_TIMEOUT_MS = 30_000;
 
 interface RawShopierItem {
   id: string;
@@ -119,6 +119,7 @@ async function fetchShopierSearchViaHttp(query: string): Promise<{ items: RawSho
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
       Accept: "application/json, text/plain, */*",
+      "X-Requested-With": "XMLHttpRequest",
       Referer: STORE_URL,
       Origin: "https://www.shopier.com",
       ...(jar.size > 0 ? { Cookie: jar.header() } : {}),
@@ -162,6 +163,7 @@ async function fetchShopierSearchViaBrowser(query: string): Promise<RawShopierIt
           headers: {
             "Content-Type": "application/x-www-form-urlencoded",
             Accept: "application/json, text/plain, */*",
+            "X-Requested-With": "XMLHttpRequest",
           },
           body: requestBody,
         });
@@ -188,9 +190,17 @@ async function fetchShopierSearchViaBrowser(query: string): Promise<RawShopierIt
  * issuing the search request. Selectors are generic guesses (unverified
  * against the live markup, see scripts/inspect.mjs); Escape is a cheap,
  * safe fallback that closes most modal implementations regardless of markup.
+ *
+ * The wait here also doubles as headroom for a possible WAF/JS challenge
+ * (e.g. Cloudflare-style interstitial) to finish and set its clearance
+ * cookie before the search request fires — domcontentloaded alone doesn't
+ * guarantee that's done. Deliberately not `waitUntil: "networkidle"` on the
+ * goto instead: sites with any background analytics/beacon traffic can keep
+ * the network "busy" indefinitely and that would eat the whole navigation
+ * timeout for nothing.
  */
 async function dismissPopup(page: Page): Promise<void> {
-  await page.waitForTimeout(1200);
+  await page.waitForTimeout(2500);
 
   const closeSelectors = [
     'button[aria-label="Kapat" i]',
