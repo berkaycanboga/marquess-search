@@ -254,27 +254,44 @@ function shopierItemToProduct(item: RawShopierItem, variants: ProductVariant[]):
 
 // --- response parsing --------------------------------------------------------
 
+const PAYLOAD_PREVIEW_LENGTH = 500;
+
 /**
  * The search endpoint's exact response shape wasn't captured in the source
  * notes (only the request format, reverse-engineered from search_elasticsearch.js).
  * We try several common shapes an Elasticsearch-backed search endpoint might
- * return. If Shopier's real payload doesn't match, run scripts/inspect.mjs
- * against SEARCH_URL (with network access) to see the actual body and adjust
- * `findCandidateArrays`/`normalizeShopierItem` below.
+ * return. If none of them fit, we don't silently report "0 results" — that
+ * would be indistinguishable from a genuine empty search and hide a real
+ * parsing gap. Instead we throw with a slice of the actual payload, which
+ * surfaces directly in the UI (SourceResult.error) so the real shape can be
+ * read off the screen and used to fix findCandidateArrays/normalizeShopierItem
+ * below, without needing server logs.
  */
 function parseShopierSearchPayload(text: string): RawShopierItem[] {
   let data: unknown;
   try {
     data = JSON.parse(text);
   } catch {
-    throw new HttpError("Arama cevabı JSON olarak ayrıştırılamadı (Shopier beklenmeyen bir gövde döndürdü)");
+    throw new HttpError(`Arama cevabı JSON olarak ayrıştırılamadı — ham gövde: ${text.slice(0, PAYLOAD_PREVIEW_LENGTH)}`);
   }
 
-  for (const arr of findCandidateArrays(data)) {
+  const candidates = findCandidateArrays(data);
+
+  for (const arr of candidates) {
     const items = arr.map(normalizeShopierItem).filter((x): x is RawShopierItem => x !== null);
     if (items.length > 0) return items;
   }
-  return [];
+
+  // All candidate arrays we found were empty -> genuinely no results for this query.
+  if (candidates.length > 0 && candidates.every((arr) => arr.length === 0)) {
+    return [];
+  }
+
+  // Either no recognizable array field at all, or one had entries but none of
+  // them normalized (a field-name mismatch in normalizeShopierItem) — surface
+  // the real shape instead of quietly returning an empty result set.
+  const preview = JSON.stringify(data).slice(0, PAYLOAD_PREVIEW_LENGTH);
+  throw new HttpError(`Arama cevabı tanınmayan bir şekilde geldi, ürün çıkarılamadı. Ham cevap: ${preview}`);
 }
 
 function findCandidateArrays(data: unknown): unknown[][] {
