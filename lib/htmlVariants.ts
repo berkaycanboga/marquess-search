@@ -1,11 +1,18 @@
 import type { CheerioAPI } from "cheerio";
-import { parseTurkishPrice, parseAmountUnit, pricePerGram, pricePerMl } from "./format";
+import { parseTurkishPrice, parseRawNumber, parseAmountUnit, pricePerGram, pricePerMl } from "./format";
 import type { ProductVariant, Unit } from "./types";
 
 export const QUALITY_PATTERN = /\b(TOP|DELUX|DEL[ÜU]KS|EG[- ]?EKONOM[İI]K|EKONOM[İI]K)\b/i;
 export const PRICE_PATTERN = /(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})?)\s*(TL|₺)/i;
 
-export function buildVariant(label: string, amount: number, unit: Unit, price: number, quality?: string): ProductVariant {
+export function buildVariant(
+  label: string,
+  amount: number,
+  unit: Unit,
+  price: number,
+  quality?: string,
+  inStock?: boolean,
+): ProductVariant {
   return {
     label: label.trim(),
     amount,
@@ -15,6 +22,7 @@ export function buildVariant(label: string, amount: number, unit: Unit, price: n
     currency: "TRY",
     pricePerGram: pricePerGram(price, amount, unit),
     pricePerMl: pricePerMl(price, amount, unit),
+    inStock,
   };
 }
 
@@ -35,7 +43,16 @@ export function dedupeVariants(variants: ProductVariant[]): ProductVariant[] {
   return out;
 }
 
-/** Elements carrying data-price/data-fiyat plus a gram/ml label in a sibling attribute. */
+/**
+ * Elements carrying data-price/data-fiyat plus a gram/ml label in a sibling
+ * attribute. `data-type` (confirmed against esans.com.tr's real markup —
+ * their gram/quantity picker is `<a data-price="543.79" data-type="15 GRAM"
+ * data-instock="1" ...>`) is checked first; the rest are generic guesses for
+ * other sites. Deliberately does NOT fall back to `data-weight`: on
+ * esans.com.tr that attribute holds a plain kg decimal ("0.05") with no unit
+ * word, which used to be picked up ahead of the real label and silently fail
+ * to parse, making every variant fall through to the single-price fallback.
+ */
 export function variantsFromDataAttributes($: CheerioAPI): ProductVariant[] | null {
   const candidates = $("[data-price], [data-fiyat]");
   if (candidates.length === 0) return null;
@@ -43,17 +60,19 @@ export function variantsFromDataAttributes($: CheerioAPI): ProductVariant[] | nu
   const variants: ProductVariant[] = [];
   candidates.each((_, el) => {
     const $el = $(el);
-    const priceRaw = $el.attr("data-price") || $el.attr("data-fiyat") || $el.text();
-    const price = parseTurkishPrice(String(priceRaw));
+    // data-price/data-fiyat are machine-written floats (parseRawNumber); the
+    // .text() fallback is genuine human-formatted display text (parseTurkishPrice).
+    const priceAttr = $el.attr("data-price") ?? $el.attr("data-fiyat");
+    const price = priceAttr != null ? parseRawNumber(priceAttr) : parseTurkishPrice($el.text());
     if (price == null) return;
 
     const labelRaw =
+      $el.attr("data-type") ||
       $el.attr("data-gram") ||
-      $el.attr("data-weight") ||
-      $el.attr("data-ml") ||
       $el.attr("data-variant") ||
       $el.attr("data-option") ||
       $el.attr("title") ||
+      $el.attr("data-ml") ||
       $el.text();
     const amountUnit = parseAmountUnit(String(labelRaw));
     if (!amountUnit) return;
@@ -64,8 +83,18 @@ export function variantsFromDataAttributes($: CheerioAPI): ProductVariant[] | nu
       extractQuality($el.text()) ||
       extractQuality(String(labelRaw));
 
+    const stockRaw = $el.attr("data-instock");
+    const inStock = stockRaw != null ? stockRaw === "1" : undefined;
+
     variants.push(
-      buildVariant(String(labelRaw).trim() || `${amountUnit.amount} ${amountUnit.unit}`, amountUnit.amount, amountUnit.unit, price, quality),
+      buildVariant(
+        String(labelRaw).trim() || `${amountUnit.amount} ${amountUnit.unit}`,
+        amountUnit.amount,
+        amountUnit.unit,
+        price,
+        quality,
+        inStock,
+      ),
     );
   });
 

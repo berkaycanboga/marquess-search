@@ -58,6 +58,13 @@ export async function searchEsans(query: string): Promise<SourceResult> {
         try {
           if (i > 0) await sleep(DETAIL_FETCH_DELAY_MS);
           variants = await fetchEsansVariants(card.url);
+          // esans.com.tr lists each quality (TOP/EG-EKONOMİK/DELUX) as its own
+          // product/URL rather than a per-variant attribute — the gram picker
+          // on the detail page carries no quality marker of its own, so carry
+          // over what we already parsed from the product name/card.
+          if (card.quality) {
+            variants = variants.map((v) => (v.quality ? v : { ...v, quality: card.quality }));
+          }
         } catch {
           degraded = true;
         }

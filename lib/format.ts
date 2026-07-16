@@ -65,17 +65,33 @@ export function parseTurkishPrice(raw: string): number | null {
 }
 
 /**
+ * For prices sourced from machine-written attributes (e.g. `data-price="1413.666"`)
+ * rather than human-formatted display text — always a plain JS float string,
+ * '.' is always the decimal point, never a thousands separator. Using
+ * parseTurkishPrice on these is wrong: e.g. "1413.666" has exactly 3 digits
+ * after the dot and gets misread as 1.413.666 by the thousands-grouping
+ * heuristic, when it actually means 1413.666.
+ */
+export function parseRawNumber(raw: string): number | null {
+  const value = Number.parseFloat(raw);
+  return Number.isFinite(value) ? value : null;
+}
+
+/**
  * Parses variant labels like "100 GRAM", "1 KİLO", "50 ML" into amount+unit.
  */
 export function parseAmountUnit(raw: string): { amount: number; unit: Unit } | null {
   const text = raw.trim().toUpperCase().replace(",", ".");
-  const match = text.match(/([\d.]+)\s*(GRAM|GR|KILO|KG|ML|MİLİLİTRE|MILILITRE)/);
+  // "KİLO" (Turkish dotted İ, as esans.com.tr writes it) is a different code
+  // point from plain ASCII "KILO" — .toUpperCase() does not convert between
+  // them, so both must be matched explicitly.
+  const match = text.match(/([\d.]+)\s*(GRAM|GR|K[İI]LO|KG|ML|MİLİLİTRE|MILILITRE)/);
   if (!match) return null;
   const amount = Number.parseFloat(match[1]);
   if (!Number.isFinite(amount)) return null;
   const unitToken = match[2];
   let unit: Unit;
-  if (unitToken === "KILO" || unitToken === "KG") unit = "kg";
+  if (unitToken === "KİLO" || unitToken === "KILO" || unitToken === "KG") unit = "kg";
   else if (unitToken === "ML" || unitToken === "MİLİLİTRE" || unitToken === "MILILITRE") unit = "ml";
   else unit = "gr";
   return { amount, unit };
