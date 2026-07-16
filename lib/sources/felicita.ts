@@ -88,7 +88,9 @@ async function fetchFelicitaProduct(id: string): Promise<ProductResult | null> {
       label: volumeLabel || child.sku,
       amount: amountUnit.amount,
       unit: amountUnit.unit,
-      quality: child.variantAttributes?.Quality,
+      // Uppercased to match esans.com.tr's quality labels (TOP/DELUX/...) so
+      // the UI's quality filter doesn't show "Top" and "TOP" as separate chips.
+      quality: child.variantAttributes?.Quality?.toUpperCase(),
       price: child.price,
       currency: "TRY",
       pricePerGram: pricePerGram(child.price, amountUnit.amount, amountUnit.unit),

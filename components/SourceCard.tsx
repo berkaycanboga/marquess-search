@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { formatTRY } from "@/lib/format";
-import type { ProductResult, ProductVariant, SourceResult } from "@/lib/types";
+import type { ProductResult, SourceResult } from "@/lib/types";
 
 export function SourceCard({ result }: { result: SourceResult }) {
   const tone = !result.ok ? "danger" : result.degraded ? "accent" : "success";
@@ -35,66 +35,55 @@ export function SourceCard({ result }: { result: SourceResult }) {
 }
 
 function ProductRow({ product }: { product: ProductResult }) {
-  const [open, setOpen] = useState(false);
-  const cheapest = cheapestVariant(product.variants);
-
-  return (
-    <div className="rounded-xl border border-border/70 p-3">
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex items-start gap-3">
-          <Thumbnail src={product.imageUrl} alt={product.name} />
-          <div>
-            <a
-              href={product.url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-sm font-medium text-foreground hover:text-accent hover:underline"
-            >
-              {product.name}
-            </a>
-            {cheapest && (
-              <p className="mt-1 text-xs text-muted">
-                en düşük: {formatTRY(cheapest.price)} · {cheapest.label}
-                {cheapest.quality ? ` · ${cheapest.quality}` : ""}
-              </p>
-            )}
-          </div>
-        </div>
-        {product.variants.length > 1 && (
-          <button
-            type="button"
-            onClick={() => setOpen((v) => !v)}
-            className="shrink-0 text-xs whitespace-nowrap text-accent hover:underline"
-          >
-            {open ? "gizle" : `${product.variants.length} seçenek`}
-          </button>
-        )}
-      </div>
-
-      {open && (
-        <ul className="mt-3 space-y-1 border-t border-border/70 pt-3 text-xs">
-          {product.variants.map((v, i) => (
-            <li key={i} className="flex items-center justify-between gap-3 text-muted">
-              <span>
-                {v.label}
-                {v.quality ? ` · ${v.quality}` : ""}
-              </span>
-              <span className="whitespace-nowrap text-foreground">{formatTRY(v.price)}</span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-function cheapestVariant(variants: ProductVariant[]): ProductVariant | undefined {
-  if (variants.length === 0) return undefined;
-  return [...variants].sort((a, b) => {
+  const options = [...product.variants].sort((a, b) => {
     const av = a.pricePerGram ?? a.pricePerMl ?? a.price;
     const bv = b.pricePerGram ?? b.pricePerMl ?? b.price;
     return av - bv;
-  })[0];
+  });
+  const [selectedIndex, setSelectedIndex] = useState(0);
+  const selected = options[selectedIndex];
+
+  return (
+    <div className="rounded-xl border border-border/70 p-3">
+      <div className="flex items-start gap-3">
+        <Thumbnail src={product.imageUrl} alt={product.name} />
+        <div className="min-w-0 flex-1">
+          <a
+            href={product.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-sm font-medium text-foreground hover:text-accent hover:underline"
+          >
+            {product.name}
+          </a>
+          {selected && (
+            <div className="mt-1.5 flex flex-wrap items-center gap-2">
+              {options.length > 1 ? (
+                <select
+                  value={selectedIndex}
+                  onChange={(e) => setSelectedIndex(Number(e.target.value))}
+                  className="rounded-md border border-border bg-surface px-1.5 py-0.5 text-xs text-foreground outline-none focus:border-accent"
+                >
+                  {options.map((v, idx) => (
+                    <option key={idx} value={idx}>
+                      {v.label}
+                      {v.quality ? ` · ${v.quality}` : ""}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <span className="text-xs text-muted">
+                  {selected.label}
+                  {selected.quality ? ` · ${selected.quality}` : ""}
+                </span>
+              )}
+              <span className="text-xs font-medium text-foreground">{formatTRY(selected.price)}</span>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function Thumbnail({ src, alt }: { src?: string; alt: string }) {
