@@ -1,5 +1,5 @@
 import * as cheerio from "cheerio";
-import type { Page } from "playwright-core";
+import type { Page } from "patchright-core";
 import { fetchWithTimeout, sleep, withTimeout, CookieJar, HttpError, BROWSER_USER_AGENT } from "../http";
 import { launchBrowser, newStealthContext } from "../browser";
 import { parseTurkishPrice } from "../format";
