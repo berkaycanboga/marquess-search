@@ -184,13 +184,21 @@ async function searchViaDirectFetch(page: Page, query: string): Promise<RawShopi
         },
         body: requestBody,
       });
-      return { status: res.status, text: await res.text() };
+      return { status: res.status, text: await res.text(), hadCsrfToken: csrfToken.length > 0 };
     },
     { url: SEARCH_URL, requestBody },
   );
 
   if (result.status < 200 || result.status >= 300) {
-    throw new HttpError(`Arama isteği (headless browser) ${result.status} döndü`, result.status);
+    // Surface enough to diagnose without needing server logs: whether the
+    // csrf-token meta tag we guessed even exists on the real page, plus a
+    // preview of the actual rejection body — a Cloudflare challenge page
+    // reads very differently from an app-level 403 with a JSON error.
+    const bodyPreview = result.text.slice(0, PAYLOAD_PREVIEW_LENGTH);
+    throw new HttpError(
+      `Arama isteği (headless browser) ${result.status} döndü (csrf-token meta etiketi ${result.hadCsrfToken ? "bulundu" : "bulunamadı"}) — ham gövde: ${bodyPreview}`,
+      result.status,
+    );
   }
 
   return parseShopierSearchPayload(result.text);
