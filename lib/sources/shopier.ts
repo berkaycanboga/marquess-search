@@ -3,7 +3,7 @@ import type { Page } from "playwright-core";
 import { fetchWithTimeout, sleep, withTimeout, CookieJar, HttpError, BROWSER_USER_AGENT } from "../http";
 import { launchBrowser } from "../browser";
 import { parseTurkishPrice } from "../format";
-import { buildVariant, variantsFromDataAttributes, variantsFromLabeledElements } from "../htmlVariants";
+import { PRICE_PATTERN, buildVariant, variantsFromDataAttributes, variantsFromLabeledElements } from "../htmlVariants";
 import { SOURCE_LABELS, type ProductResult, type ProductVariant, type SourceResult } from "../types";
 
 // John Lucas Fragrances' Shopier store slug, from the notes.
@@ -162,59 +162,74 @@ async function fetchShopierSearchViaBrowser(query: string): Promise<RawShopierIt
   }
 }
 
+// Confirmed against the store's real markup (user-supplied): the search bar
+// lives behind a Bootstrap-style dropdown toggle, and results render into an
+// initially-empty <ul id="shopier-es--results"> with NO page navigation and
+// NO URL change — so there may not even be a plain request/response to
+// intercept (could be filtering an already-loaded list client-side). Reading
+// the rendered DOM after typing is the only approach that works regardless.
+const SEARCH_TOGGLE_SELECTOR = ".shopier-es .dropdown-toggle, .dropdown-toggle";
+const SEARCH_INPUT_SELECTOR = '#shopier-es--input, input[name="search"], .shopier--search-input';
+const SEARCH_RESULTS_SELECTOR = "#shopier-es--results, .shopier-es--results";
+
 /**
- * Types into the store's own search box and reads back whatever response its
- * own search_elasticsearch.js triggers, instead of us reconstructing the
- * request — the notes' recommended last resort. This sidesteps any hidden
- * token/signature the site's JS might attach that a hand-built fetch()
- * wouldn't have. Selector list is a best-effort guess (unverified against
- * live markup); if it doesn't match, share the search box's real HTML
- * (view-source, Ctrl+F "search") to pin down an exact selector.
+ * Types into the store's own search box and reads the results it renders
+ * into its dropdown — the notes' recommended last resort, and the only
+ * approach that doesn't depend on guessing a request/response shape we have
+ * no confirmed visibility into. The inner <li> markup for a populated result
+ * is still a guess (unverified — we only have the empty-state container); if
+ * this keeps coming back with 0 items despite a query that should have hits,
+ * share the populated dropdown's HTML/screenshot to pin down the real shape.
  */
 async function searchViaRealInput(page: Page, query: string): Promise<RawShopierItem[]> {
-  const inputSelectors = [
-    'input[type="search"]',
-    'input[name*="search" i]',
-    'input[id*="search" i]',
-    'input[placeholder*="ara" i]',
-    'input[placeholder*="search" i]',
-    '[class*="search"] input',
-  ];
-
-  let input = null;
-  for (const selector of inputSelectors) {
-    const locator = page.locator(selector).first();
-    if ((await locator.count().catch(() => 0)) > 0) {
-      input = locator;
-      break;
-    }
-  }
-  if (!input) {
-    throw new HttpError("Arama kutusu bulunamadı (bilinen seçicilerle eşleşmedi)");
+  const toggle = page.locator(SEARCH_TOGGLE_SELECTOR).first();
+  if ((await toggle.count().catch(() => 0)) > 0) {
+    await toggle.click({ timeout: 3000 }).catch(() => {});
   }
 
-  // Attach the listener before typing: "search as you type" debounces on the
-  // last keystroke, so the request matching the *complete* query could fire
-  // either during or right after typing — filtering on postData rather than
-  // just being "the first response" avoids matching an earlier partial-query
-  // request (e.g. one fired after just "i" or "ima").
-  const responsePromise = page.waitForResponse(
-    (res) =>
-      res.url().includes("/search_product/") &&
-      res.request().method() === "POST" &&
-      (res.request().postData() ?? "").includes(encodeURIComponent(query)),
-    { timeout: 15_000 },
-  );
+  const input = page.locator(SEARCH_INPUT_SELECTOR).first();
+  if ((await input.count().catch(() => 0)) === 0) {
+    throw new HttpError("Arama kutusu bulunamadı (#shopier-es--input eşleşmedi)");
+  }
 
   await input.click({ timeout: 5000 });
   await input.fill("").catch(() => {});
   await input.pressSequentially(query, { delay: 80, timeout: 15_000 });
 
-  const response = await responsePromise;
-  if (!response.ok()) {
-    throw new HttpError(`Arama isteği (gerçek kutu) ${response.status()} döndü`, response.status());
+  const results = page.locator(SEARCH_RESULTS_SELECTOR).first();
+  try {
+    await results.locator("li").first().waitFor({ state: "attached", timeout: 10_000 });
+  } catch {
+    // Debounce elapsed with nothing rendered — either a genuine "no matches"
+    // or the widget never populated at all; either way there's nothing to read.
+    return [];
   }
-  return parseShopierSearchPayload(await response.text());
+
+  const rawItems = await results.locator("li").evaluateAll((lis) =>
+    lis.map((li) => ({
+      href: li.querySelector("a")?.getAttribute("href") ?? null,
+      text: (li.textContent ?? "").replace(/\s+/g, " ").trim(),
+      imgSrc: li.querySelector("img")?.getAttribute("src") ?? null,
+    })),
+  );
+
+  return rawItems.map(normalizeShopierListItem).filter((x): x is RawShopierItem => x !== null);
+}
+
+function normalizeShopierListItem(item: { href: string | null; text: string; imgSrc: string | null }): RawShopierItem | null {
+  if (!item.text) return null;
+  const priceMatch = item.text.match(PRICE_PATTERN);
+  const price = priceMatch ? (parseTurkishPrice(priceMatch[0]) ?? undefined) : undefined;
+  const name = (priceMatch ? item.text.replace(priceMatch[0], "") : item.text).trim();
+  if (!name) return null;
+
+  return {
+    id: item.href ?? name,
+    name,
+    url: item.href ? absolutizeShopier(item.href) : undefined,
+    imageUrl: item.imgSrc ? absolutizeShopier(item.imgSrc) : undefined,
+    price,
+  };
 }
 
 /**
