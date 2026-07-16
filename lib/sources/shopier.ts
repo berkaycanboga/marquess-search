@@ -3,7 +3,7 @@ import type { Page } from "playwright-core";
 import { fetchWithTimeout, sleep, withTimeout, CookieJar, HttpError, BROWSER_USER_AGENT } from "../http";
 import { launchBrowser } from "../browser";
 import { parseTurkishPrice } from "../format";
-import { PRICE_PATTERN, buildVariant, variantsFromDataAttributes, variantsFromLabeledElements } from "../htmlVariants";
+import { buildVariant, variantsFromDataAttributes, variantsFromLabeledElements } from "../htmlVariants";
 import { SOURCE_LABELS, type ProductResult, type ProductVariant, type SourceResult } from "../types";
 
 // John Lucas Fragrances' Shopier store slug, from the notes.
@@ -21,6 +21,7 @@ interface RawShopierItem {
   url?: string;
   imageUrl?: string;
   price?: number;
+  inStock?: boolean;
 }
 
 export async function searchShopier(query: string): Promise<SourceResult> {
@@ -145,98 +146,22 @@ async function fetchShopierSearchViaBrowser(query: string): Promise<RawShopierIt
     const page = await context.newPage();
     await page.goto(STORE_URL, { waitUntil: "domcontentloaded", timeout: 20_000 });
     await dismissPopup(page);
-
-    try {
-      return await searchViaRealInput(page, query);
-    } catch (inputErr) {
-      try {
-        return await searchViaDirectFetch(page, query);
-      } catch (fetchErr) {
-        const inputMsg = inputErr instanceof Error ? inputErr.message : "bilinmeyen hata";
-        const fetchMsg = fetchErr instanceof Error ? fetchErr.message : "bilinmeyen hata";
-        throw new HttpError(`gerçek arama kutusu denemesi başarısız (${inputMsg}); doğrudan istek denemesi de başarısız (${fetchMsg})`);
-      }
-    }
+    return await searchViaDirectFetch(page, query);
   } finally {
     await cleanup();
   }
 }
 
-// Confirmed against the store's real markup (user-supplied): the search bar
-// lives behind a Bootstrap-style dropdown toggle, and results render into an
-// initially-empty <ul id="shopier-es--results"> with NO page navigation and
-// NO URL change — so there may not even be a plain request/response to
-// intercept (could be filtering an already-loaded list client-side). Reading
-// the rendered DOM after typing is the only approach that works regardless.
-const SEARCH_TOGGLE_SELECTOR = ".shopier-es .dropdown-toggle, .dropdown-toggle";
-const SEARCH_INPUT_SELECTOR = '#shopier-es--input, input[name="search"], .shopier--search-input';
-const SEARCH_RESULTS_SELECTOR = "#shopier-es--results, .shopier-es--results";
-
 /**
- * Types into the store's own search box and reads the results it renders
- * into its dropdown — the notes' recommended last resort, and the only
- * approach that doesn't depend on guessing a request/response shape we have
- * no confirmed visibility into. The inner <li> markup for a populated result
- * is still a guess (unverified — we only have the empty-state container); if
- * this keeps coming back with 0 items despite a query that should have hits,
- * share the populated dropdown's HTML/screenshot to pin down the real shape.
- */
-async function searchViaRealInput(page: Page, query: string): Promise<RawShopierItem[]> {
-  const toggle = page.locator(SEARCH_TOGGLE_SELECTOR).first();
-  if ((await toggle.count().catch(() => 0)) > 0) {
-    await toggle.click({ timeout: 3000 }).catch(() => {});
-  }
-
-  const input = page.locator(SEARCH_INPUT_SELECTOR).first();
-  if ((await input.count().catch(() => 0)) === 0) {
-    throw new HttpError("Arama kutusu bulunamadı (#shopier-es--input eşleşmedi)");
-  }
-
-  await input.click({ timeout: 5000 });
-  await input.fill("").catch(() => {});
-  await input.pressSequentially(query, { delay: 80, timeout: 15_000 });
-
-  const results = page.locator(SEARCH_RESULTS_SELECTOR).first();
-  try {
-    await results.locator("li").first().waitFor({ state: "attached", timeout: 10_000 });
-  } catch {
-    // Debounce elapsed with nothing rendered — either a genuine "no matches"
-    // or the widget never populated at all; either way there's nothing to read.
-    return [];
-  }
-
-  const rawItems = await results.locator("li").evaluateAll((lis) =>
-    lis.map((li) => ({
-      href: li.querySelector("a")?.getAttribute("href") ?? null,
-      text: (li.textContent ?? "").replace(/\s+/g, " ").trim(),
-      imgSrc: li.querySelector("img")?.getAttribute("src") ?? null,
-    })),
-  );
-
-  return rawItems.map(normalizeShopierListItem).filter((x): x is RawShopierItem => x !== null);
-}
-
-function normalizeShopierListItem(item: { href: string | null; text: string; imgSrc: string | null }): RawShopierItem | null {
-  if (!item.text) return null;
-  const priceMatch = item.text.match(PRICE_PATTERN);
-  const price = priceMatch ? (parseTurkishPrice(priceMatch[0]) ?? undefined) : undefined;
-  const name = (priceMatch ? item.text.replace(priceMatch[0], "") : item.text).trim();
-  if (!name) return null;
-
-  return {
-    id: item.href ?? name,
-    name,
-    url: item.href ? absolutizeShopier(item.href) : undefined,
-    imageUrl: item.imgSrc ? absolutizeShopier(item.imgSrc) : undefined,
-    price,
-  };
-}
-
-/**
- * Fallback when the real search box isn't found: fire the same request
- * search_elasticsearch.js would, from within the page's own JS context (real
- * TLS/JS fingerprint, real cookies) — reuses the exact same parsing as the
- * plain-HTTP path.
+ * Fires the exact same request the store's own search box does, from within
+ * the page's own JS context — confirmed against a real captured request
+ * (DevTools Network tab, see notes): POST to SEARCH_URL with an
+ * `X-CSRF-Token` header the plain-HTTP path can't produce (it isn't present
+ * anywhere in the response/cookies — only readable from the loaded page's
+ * `<meta name="csrf-token">` tag, standard for this Laravel-style backend,
+ * evidenced by the PHPSESSID cookie on the real request). Running fetch()
+ * inside the page also means Cloudflare sees a real browser fingerprint and
+ * automatically attaches the session's cf_clearance cookie.
  */
 async function searchViaDirectFetch(page: Page, query: string): Promise<RawShopierItem[]> {
   const requestBody = new URLSearchParams({
@@ -248,12 +173,14 @@ async function searchViaDirectFetch(page: Page, query: string): Promise<RawShopi
 
   const result = await page.evaluate(
     async ({ url, requestBody }) => {
+      const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute("content") ?? "";
       const res = await fetch(url, {
         method: "POST",
         headers: {
           "Content-Type": "application/x-www-form-urlencoded",
           Accept: "application/json, text/plain, */*",
           "X-Requested-With": "XMLHttpRequest",
+          "X-CSRF-Token": csrfToken,
         },
         body: requestBody,
       });
@@ -336,7 +263,7 @@ function shopierItemToProduct(item: RawShopierItem, variants: ProductVariant[]):
           // ₺/ml-normalized (unlike esans/Felicita this store sells finished
           // perfume by volume, not raw essence by weight, so it's never
           // comparable to their ₺/gram figures anyway).
-          [buildVariant("Liste fiyatı", 0, "ml", item.price)]
+          [buildVariant("Liste fiyatı", 0, "ml", item.price, undefined, item.inStock)]
         : [];
 
   return {
@@ -354,15 +281,17 @@ function shopierItemToProduct(item: RawShopierItem, variants: ProductVariant[]):
 const PAYLOAD_PREVIEW_LENGTH = 500;
 
 /**
- * The search endpoint's exact response shape wasn't captured in the source
- * notes (only the request format, reverse-engineered from search_elasticsearch.js).
- * We try several common shapes an Elasticsearch-backed search endpoint might
- * return. If none of them fit, we don't silently report "0 results" — that
+ * Confirmed against a real captured response (DevTools Network tab, see
+ * notes): `{ status, products: [{ id, name, link, price: { masterpass_amount,
+ * price_code_formatted, ... }, primary_image, labels: { out_of_stock: {
+ * enabled } } }], image_endpoints: { mid, ... } }`. `primary_image` is a bare
+ * filename that must be prefixed with `image_endpoints.mid` (or another size)
+ * to form a real URL — it's not a standalone path like the other sources.
+ * We don't silently report "0 results" if the shape doesn't match — that
  * would be indistinguishable from a genuine empty search and hide a real
- * parsing gap. Instead we throw with a slice of the actual payload, which
- * surfaces directly in the UI (SourceResult.error) so the real shape can be
- * read off the screen and used to fix findCandidateArrays/normalizeShopierItem
- * below, without needing server logs.
+ * parsing gap (the endpoint could change shape again). Instead we throw with
+ * a slice of the actual payload, which surfaces directly in the UI
+ * (SourceResult.error) so a shape change can be read off the screen.
  */
 function parseShopierSearchPayload(text: string): RawShopierItem[] {
   let data: unknown;
@@ -372,74 +301,53 @@ function parseShopierSearchPayload(text: string): RawShopierItem[] {
     throw new HttpError(`Arama cevabı JSON olarak ayrıştırılamadı — ham gövde: ${text.slice(0, PAYLOAD_PREVIEW_LENGTH)}`);
   }
 
-  const candidates = findCandidateArrays(data);
-
-  for (const arr of candidates) {
-    const items = arr.map(normalizeShopierItem).filter((x): x is RawShopierItem => x !== null);
-    if (items.length > 0) return items;
+  const obj = data && typeof data === "object" ? (data as Record<string, unknown>) : null;
+  if (!obj || !Array.isArray(obj.products)) {
+    const preview = JSON.stringify(data).slice(0, PAYLOAD_PREVIEW_LENGTH);
+    throw new HttpError(`Arama cevabı tanınmayan bir şekilde geldi, ürün çıkarılamadı. Ham cevap: ${preview}`);
   }
 
-  // All candidate arrays we found were empty -> genuinely no results for this query.
-  if (candidates.length > 0 && candidates.every((arr) => arr.length === 0)) {
-    return [];
-  }
+  const imageEndpoints = obj.image_endpoints as Record<string, unknown> | undefined;
+  const imageBase = typeof imageEndpoints?.mid === "string" ? imageEndpoints.mid : undefined;
 
-  // Either no recognizable array field at all, or one had entries but none of
-  // them normalized (a field-name mismatch in normalizeShopierItem) — surface
-  // the real shape instead of quietly returning an empty result set.
-  const preview = JSON.stringify(data).slice(0, PAYLOAD_PREVIEW_LENGTH);
-  throw new HttpError(`Arama cevabı tanınmayan bir şekilde geldi, ürün çıkarılamadı. Ham cevap: ${preview}`);
+  return obj.products.map((p) => normalizeShopierItem(p, imageBase)).filter((x): x is RawShopierItem => x !== null);
 }
 
-function findCandidateArrays(data: unknown): unknown[][] {
-  const arrays: unknown[][] = [];
-  if (Array.isArray(data)) arrays.push(data);
-  if (data && typeof data === "object") {
-    const obj = data as Record<string, unknown>;
-    for (const key of ["result", "results", "data", "products", "items"]) {
-      if (Array.isArray(obj[key])) arrays.push(obj[key] as unknown[]);
-    }
-    const hits = obj.hits as Record<string, unknown> | undefined;
-    if (hits && Array.isArray(hits.hits)) arrays.push(hits.hits as unknown[]);
-  }
-  return arrays;
-}
-
-function normalizeShopierItem(raw: unknown): RawShopierItem | null {
+function normalizeShopierItem(raw: unknown, imageBase: string | undefined): RawShopierItem | null {
   if (!raw || typeof raw !== "object") return null;
-  // Elasticsearch-style hits nest the real document under `_source`.
-  const container = raw as Record<string, unknown>;
-  const obj = (container._source && typeof container._source === "object" ? container._source : container) as Record<
-    string,
-    unknown
-  >;
+  const obj = raw as Record<string, unknown>;
 
-  const name = firstString(obj, ["name", "product_name", "title", "productName"]);
+  const name = typeof obj.name === "string" ? obj.name.trim() : undefined;
   if (!name) return null;
 
-  const id = firstString(obj, ["id", "product_id", "productId", "_id"]) ?? name;
-  const slug = firstString(obj, ["url", "slug", "permalink", "product_url", "productUrl"]);
-  const image = firstString(obj, ["image", "img", "image_url", "imageUrl", "thumbnail"]);
-  const priceRaw = obj.price ?? obj.product_price ?? obj.productPrice;
-  const price =
-    typeof priceRaw === "number" ? priceRaw : typeof priceRaw === "string" ? (parseTurkishPrice(priceRaw) ?? undefined) : undefined;
+  const id = typeof obj.id === "number" || typeof obj.id === "string" ? String(obj.id) : name;
+  const link = typeof obj.link === "string" ? obj.link : undefined;
+
+  const priceObj = obj.price as Record<string, unknown> | undefined;
+  let price: number | undefined;
+  if (typeof priceObj?.masterpass_amount === "number") {
+    // Integer kuruş (TRY cents), e.g. 24744 -> 247.44 TL — avoids re-parsing
+    // a human-formatted string for the one field that's already a clean number.
+    price = priceObj.masterpass_amount / 100;
+  } else if (typeof priceObj?.price_code_formatted === "string") {
+    price = parseTurkishPrice(priceObj.price_code_formatted) ?? undefined;
+  }
+
+  const imageFile = typeof obj.primary_image === "string" ? obj.primary_image : undefined;
+  const imageUrl = imageFile && imageBase ? absolutizeShopier(`${imageBase}${imageFile}`) : undefined;
+
+  const labels = obj.labels as Record<string, unknown> | undefined;
+  const outOfStock = labels?.out_of_stock as Record<string, unknown> | undefined;
+  const inStock = typeof outOfStock?.enabled === "boolean" ? !outOfStock.enabled : undefined;
 
   return {
     id,
     name,
-    url: slug ? absolutizeShopier(slug) : undefined,
-    imageUrl: image ? absolutizeShopier(image) : undefined,
+    url: link ? absolutizeShopier(link) : undefined,
+    imageUrl,
     price,
+    inStock,
   };
-}
-
-function firstString(obj: Record<string, unknown>, keys: string[]): string | undefined {
-  for (const key of keys) {
-    const value = obj[key];
-    if (typeof value === "string" && value.trim()) return value.trim();
-    if (typeof value === "number") return String(value);
-  }
-  return undefined;
 }
 
 function absolutizeShopier(path: string): string {
