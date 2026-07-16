@@ -13,7 +13,7 @@ const SEARCH_URL = `https://www.shopier.com/s/api/v1/search_product/${STORE_SLUG
 
 const MAX_DETAIL_FETCHES = 5;
 const DETAIL_FETCH_DELAY_MS = 700;
-const BROWSER_FALLBACK_TIMEOUT_MS = 30_000;
+const BROWSER_FALLBACK_TIMEOUT_MS = 45_000;
 
 interface RawShopierItem {
   id: string;
@@ -145,10 +145,36 @@ async function fetchShopierSearchViaBrowser(query: string): Promise<RawShopierIt
     const context = await browser.newContext({ userAgent: BROWSER_USER_AGENT });
     const page = await context.newPage();
     await page.goto(STORE_URL, { waitUntil: "domcontentloaded", timeout: 20_000 });
+    await waitOutCloudflareChallenge(page);
     await dismissPopup(page);
     return await searchViaDirectFetch(page, query);
   } finally {
     await cleanup();
+  }
+}
+
+const CLOUDFLARE_CHALLENGE_TIMEOUT_MS = 12_000;
+
+/**
+ * Confirmed live (see notes): the store is behind Cloudflare Turnstile, and a
+ * plain page.goto can land on its "Just a moment..." interstitial instead of
+ * the real page. Some Turnstile challenges resolve automatically for any
+ * JS-capable client after a few seconds — worth waiting out explicitly rather
+ * than the flat 2.5s dismissPopup delay (meant for the discount popup, not
+ * this). If it's still showing the interstitial after this timeout, the
+ * challenge is very likely fingerprinting the browser as automated rather
+ * than just timing a puzzle, and no amount of waiting will clear it.
+ */
+async function waitOutCloudflareChallenge(page: Page): Promise<void> {
+  const onChallenge = await page.title().then((title) => title.includes("Just a moment"));
+  if (!onChallenge) return;
+
+  try {
+    await page.waitForFunction(() => !document.title.includes("Just a moment"), undefined, {
+      timeout: CLOUDFLARE_CHALLENGE_TIMEOUT_MS,
+    });
+  } catch {
+    throw new HttpError("Cloudflare doğrulaması (Just a moment...) zaman aşımında temizlenmedi — headless tarayıcı bot olarak algılanmış olabilir");
   }
 }
 
